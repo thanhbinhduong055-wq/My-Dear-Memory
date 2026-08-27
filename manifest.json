@@ -1,0 +1,13 @@
+{
+  "display_name": "私语手札 · Private Journal",
+  "loading_order": 20,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Codex",
+  "version": "0.1.0",
+  "auto_update": false
+}
+
