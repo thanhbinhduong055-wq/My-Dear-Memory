@@ -1,0 +1,36 @@
+:root { --pj-paper:#f3ead7; --pj-ink:#342821; --pj-wine:#713c46; --pj-gold:#ac8651; }
+#private-journal { position:fixed; inset:0; z-index:9999; display:none; color:var(--pj-ink); font-family:"Noto Serif SC","Songti SC",Georgia,serif; }
+#private-journal.open { display:block; }
+.pj-backdrop { position:absolute; inset:0; background:rgba(18,14,13,.76); backdrop-filter:blur(8px); }
+.pj-book { position:absolute; inset:4vh max(3vw,18px); max-width:1040px; margin:auto; display:grid; grid-template-rows:auto auto 1fr auto; overflow:hidden; background:var(--pj-paper); border:1px solid rgba(255,255,255,.2); border-radius:7px 18px 18px 7px; box-shadow:0 30px 100px #000b, inset 22px 0 35px #765b3922; }
+.pj-book::before { content:""; position:absolute; inset:0; pointer-events:none; opacity:.28; background:repeating-linear-gradient(0deg,transparent 0 27px,#845e3420 28px); }
+.pj-book nav,.pj-book footer { position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; padding:18px 28px; border-bottom:1px solid #8d704036; }
+.pj-book nav h1 { margin:2px 0 0; font-size:clamp(21px,3vw,34px); font-weight:500; }
+.pj-overline,.pj-kicker { color:var(--pj-wine); letter-spacing:.18em; font-size:11px; }
+.pj-book button { color:inherit; cursor:pointer; border:0; background:none; font:inherit; }
+.pj-book nav>button { font-size:30px; opacity:.55; }
+.pj-tabs { position:relative; z-index:1; display:flex; gap:8px; padding:12px 28px; overflow:auto; border-bottom:1px solid #8d704036; }
+.pj-tabs button { white-space:nowrap; padding:8px 13px; border-radius:99px; color:#6c5a4d; }
+.pj-tabs button.active { color:#fff8e8; background:var(--pj-wine); box-shadow:0 4px 14px #713c4644; }
+.pj-pages { position:relative; z-index:1; overflow:auto; padding:26px clamp(20px,6vw,76px) 80px; }
+.pj-page { max-width:740px; margin:0 auto 38px; padding:34px clamp(24px,5vw,58px); background:#fffaf0b8; border:1px solid #8f744636; box-shadow:0 12px 30px #684c2b18; }
+.pj-page header { display:flex; justify-content:space-between; }
+.pj-page h2 { margin:13px 0 5px; font-weight:500; font-size:28px; }
+.pj-meta { color:#887365; font-size:12px; }
+.pj-body { margin:28px 0; line-height:2; font-size:15px; letter-spacing:.03em; }
+.pj-poem { margin:30px 0; padding:18px 22px; border-left:2px solid var(--pj-gold); color:#5c493d; line-height:1.9; background:#ac86510b; }
+.pj-poem cite { display:block; margin-top:9px; text-align:right; font-size:12px; opacity:.7; }
+.pj-song { display:grid; gap:7px; padding-top:15px; border-top:1px dashed #80643f55; color:#715f51; }
+.pj-song q { font-style:italic; }
+.pj-song small { opacity:.6; }
+.pj-page details { margin-top:22px; font-size:12px; opacity:.65; }
+.pj-delete { font-size:22px!important; opacity:.35; }
+.pj-empty { margin:15vh auto; text-align:center; color:#856f61; font-size:20px; line-height:2; }
+.pj-empty small { font-size:13px; opacity:.7; }
+.pj-book footer { border:0; border-top:1px solid #8d704036; background:#eadfc9dd; }
+.pj-book footer button { padding:10px 20px; border-radius:4px; }
+.pj-primary { color:#fff8e8!important; background:var(--pj-wine)!important; }
+.pj-secondary { border:1px solid #856d4e77!important; }
+#private-journal-launcher { position:fixed; right:18px; bottom:118px; z-index:3000; width:44px; height:44px; border-radius:50%; border:1px solid #d7bd92; color:#fff8e8; background:#713c46; box-shadow:0 8px 24px #0006; cursor:pointer; font-size:22px; }
+@media(max-width:600px){ .pj-book{inset:0;border-radius:0}.pj-book nav,.pj-book footer{padding:14px 16px}.pj-tabs{padding:10px 14px}.pj-pages{padding:18px 12px 70px}.pj-page{padding:26px 20px}.pj-page h2{font-size:23px} }
+
