@@ -61,6 +61,22 @@ const missingSongTitle = vm.runInContext(`normalizePage({ title: '一页', body:
 assert.equal(missingSongTitle.song.title, '未提供歌曲');
 assert.equal(missingSongTitle.song.isMissingTitle, true);
 
+const taggedPage = vm.runInContext(`parseJson('<journal_page><title>雨夜</title><dateLabel>此刻</dateLabel><mood>担心</mood><body>我希望你平安回来。</body><poem><text>一行短诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>Moon River</title><artist>Audrey Hepburn</artist><excerpt>Two drifters</excerpt><isParaphrase>false</isParaphrase></song><anchors><item>他受伤了</item></anchors><confidence>high</confidence></journal_page>', 'love_letter')`, sandbox);
+assert.equal(taggedPage.title, '雨夜');
+assert.equal(taggedPage.body, '我希望你平安回来。');
+assert.equal(taggedPage.song.title, 'Moon River');
+
+const leakedPayload = '{"title":"你别受伤","dateLabel":"此刻","mood":"担心","body":"姜藏：\\n\\n我写的是"晚饭想吃铜锅涮肉"，也是真的怕你疼。","poem":{"text":"一行诗","author":"原创","work":"无题","isOriginal":true},"song":{"title":"一路生花","artist":"温奕心","excerpt":"我希望许过的愿望一路生花","isParaphrase":false},"memoryAnchors":[],"confidence":"low"}';
+sandbox.leakedPayload = leakedPayload;
+const recoveredLeakedPage = vm.runInContext(`parseJson(leakedPayload, 'love_letter')`, sandbox);
+assert.equal(recoveredLeakedPage.title, '你别受伤');
+assert.match(recoveredLeakedPage.body, /铜锅涮肉/);
+assert.doesNotMatch(recoveredLeakedPage.body, /^\{/);
+const repairedStoredPage = vm.runInContext(`repairStoredPage({ id: 'legacy-1', type: 'love_letter', body: leakedPayload, createdAt: 'then' })`, sandbox);
+assert.equal(repairedStoredPage.id, 'legacy-1');
+assert.equal(repairedStoredPage.type, 'love_letter');
+assert.match(repairedStoredPage.body, /铜锅涮肉/);
+
 const impressionPrompt = vm.runInContext(`buildPrompt('impression', { impressionFocus: 'custom', customRequest: '观察他的克制与温柔' })`, sandbox);
 assert.match(impressionPrompt, /叙述视角始终是 User/);
 assert.match(impressionPrompt, /观察他的克制与温柔/);
@@ -82,8 +98,12 @@ assert.equal(relationship.source, 'model');
 
 const batchPrompt = vm.runInContext(`buildBatchPrompt({ impressionFocus: 'personality' })`, sandbox);
 assert.match(batchPrompt, /禁止只写其中一个栏目/);
-assert.match(batchPrompt, /updates 必须包含四个对象/);
+assert.match(batchPrompt, /必须按顺序完整输出/);
 assert.match(batchPrompt, /本轮不会发送第二次请求补字段/);
+
+const taggedBatch = vm.runInContext(`parseBatch('<journal_batch><relationship><status>uncertain</status><reason>证据不足</reason><evidence><item>尚未确认</item></evidence></relationship><page type="impression"><title>印象</title><body>他很克制。</body><song><title>夜曲</title><artist>周杰伦</artist><excerpt>一小段</excerpt></song></page><page type="daily_note"><title>日常</title><body>我们一起吃饭。</body><song><title>稻香</title><artist>周杰伦</artist><excerpt>还记得你说家是唯一的城堡</excerpt></song></page><page type="love_letter"><title>给你</title><body>我想你平安。</body><song><title>Moon River</title><artist>Audrey Hepburn</artist><excerpt>Two drifters</excerpt></song></page><page type="romance_diary" save="false"></page></journal_batch>')`, sandbox);
+assert.equal(taggedBatch.updates.length, 3);
+assert.deepEqual(Array.from(taggedBatch.updates, item => item.type), ['impression', 'daily_note', 'love_letter']);
 
 const batchResult = vm.runInContext(`parseBatch(JSON.stringify({
   relationship: { status: 'uncertain', reason: '证据不足', evidence: [] },
@@ -98,7 +118,7 @@ assert.equal(batchResult.updates.length, 3);
 assert.equal(batchResult.relationship.status, 'uncertain');
 
 const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression' }] })`, sandbox);
-assert.equal(legacyBook.version, 2);
+assert.equal(legacyBook.version, 3);
 assert.equal(legacyBook.pages[0].type, 'impression');
 
 const separatedPages = vm.runInContext(`pagesForType({ pages: [

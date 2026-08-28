@@ -89,7 +89,7 @@ function storageKey() {
 function blankBook() {
   const id = identity();
   return {
-    version: 2,
+    version: 3,
     ...id,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -101,14 +101,16 @@ function blankBook() {
 async function loadBook() {
   currentBook = await SillyTavern.libs.localforage.getItem(storageKey()) || blankBook();
   migrateBook(currentBook);
+  await SillyTavern.libs.localforage.setItem(storageKey(), currentBook);
   render();
 }
 
 function migrateBook(book) {
-  book.version = 2;
+  book.version = 3;
   book.pages = Array.isArray(book.pages) ? book.pages : [];
-  book.pages.forEach(page => {
+  book.pages = book.pages.map(page => {
     if (page.type === 'first_impression') page.type = 'impression';
+    return repairStoredPage(page);
   });
   book.relationship = Object.assign(
     { status: 'unchecked', reason: '', evidence: [], checkedAt: null, source: null },
@@ -143,16 +145,14 @@ function buildPrompt(type, options = {}) {
     `写作要求：使用 ${settings.language}，参考 User Persona 贴合 User 的表达习惯；有具体细节和情感余韵，避免模板腔。\n` +
     `诗歌：选择一段与本页情绪贴合的中外诗歌。优先公共领域作品；如果版权状态不确定，请创作原创短诗并明确标记“原创”。不要伪造作者或出处。\n` +
     `歌曲：必须选择一首真实存在且与本页贴合的歌曲，song.title 必须填写准确歌名，song.artist 必须填写歌手或创作者，二者不可留空。歌词只摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或不超过20个中日韩字符；若无法可靠确认原句，保留歌名和歌手，并把 excerpt 写成意译或氛围描述，isParaphrase 设为 true。不要伪造歌名、歌手或歌词。\n\n` +
-    `只输出严格 JSON，不要 Markdown 代码围栏：{` +
-    `"title":"页标题","dateLabel":"故事内日期；未知则写此刻","mood":"User 的一个短语","perspective":"user",` +
-    `"body":"日记或书信正文，分段用\\n",` +
-    `"poem":{"text":"诗歌摘录或原创短诗","author":"作者或原创","work":"作品名或无题","isOriginal":false},` +
-    `"song":{"title":"不可留空的准确歌名","artist":"不可留空的歌手或创作者","excerpt":"极短摘录或意译","isParaphrase":false},` +
-    `"memoryAnchors":["本页依据的1-5个简短事件锚点"],"confidence":"high|medium|low"}`;
+    `只输出下面的标签格式，不要 JSON、Markdown 或代码围栏。标签内可以直接写正常引号和换行：\n` +
+    `<journal_page><title>页标题</title><dateLabel>故事内日期或此刻</dateLabel><mood>User的心绪</mood><body>正文</body><poem><text>诗歌</text><author>作者或原创</author><work>作品名或无题</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手或创作者</artist><excerpt>极短摘抄或意译</excerpt><isParaphrase>false</isParaphrase></song><anchors><item>依据1</item><item>依据2</item></anchors><confidence>high|medium|low</confidence></journal_page>`;
 }
 
 function parseJson(raw, type = activeType) {
-  const cleaned = String(raw || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const cleaned = stripResponseFence(raw);
+  const taggedPage = parseTaggedPage(cleaned);
+  if (taggedPage) return taggedPage;
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start >= 0 && end > start) {
@@ -160,10 +160,15 @@ function parseJson(raw, type = activeType) {
       const page = JSON.parse(cleaned.slice(start, end + 1));
       if (page.title && page.body) return normalizePage(page);
     } catch (error) {
-      console.warn('[Private Journal] JSON parse failed; keeping the model text as a page.', error);
+      console.warn('[Private Journal] Strict JSON parse failed; trying local recovery.');
     }
   }
+  const recoveredPage = parseLooseJsonPage(cleaned, type);
+  if (recoveredPage) return recoveredPage;
   if (!cleaned) throw new Error('正文 API 返回了空内容');
+  if (/^[\s\S]*\{\s*["'](?:title|body)["']\s*:/i.test(cleaned)) {
+    throw new Error('模型返回的结构化内容不完整，已阻止代码样式文本写入手札');
+  }
   const meta = PAGE_TYPES[type] || PAGE_TYPES.daily_note;
   return normalizePage({
     title: meta.label,
@@ -173,6 +178,124 @@ function parseJson(raw, type = activeType) {
     confidence: 'low',
     memoryAnchors: [],
   });
+}
+
+function stripResponseFence(raw) {
+  return String(raw || '').trim().replace(/^```(?:json|xml|html)?\s*/i, '').replace(/\s*```$/, '');
+}
+
+function decodeLooseText(value = '') {
+  return String(value)
+    .replace(/^<!\[CDATA\[/, '')
+    .replace(/\]\]>$/, '')
+    .replace(/\\r\\n|\\n|\\r/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .trim();
+}
+
+function extractTagRaw(block, tag) {
+  const match = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i').exec(String(block || ''));
+  return match ? match[1] : '';
+}
+
+function extractTag(block, tag) {
+  return decodeLooseText(extractTagRaw(block, tag));
+}
+
+function extractTagItems(block) {
+  return [...String(block || '').matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)]
+    .map(match => decodeLooseText(match[1]))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function parseTaggedPage(block) {
+  if (!/<(?:journal_page|page)\b/i.test(String(block || ''))) return null;
+  const pageBlock = extractTagRaw(block, 'journal_page') || String(block || '');
+  const body = extractTag(pageBlock, 'body');
+  if (!body) return null;
+  const poemBlock = extractTagRaw(pageBlock, 'poem');
+  const songBlock = extractTagRaw(pageBlock, 'song');
+  const anchorsBlock = extractTagRaw(pageBlock, 'anchors');
+  return normalizePage({
+    title: extractTag(pageBlock, 'title') || '无题',
+    dateLabel: extractTag(pageBlock, 'dateLabel') || '此刻',
+    mood: extractTag(pageBlock, 'mood') || '未命名的心绪',
+    body,
+    poem: {
+      text: extractTag(poemBlock, 'text'),
+      author: extractTag(poemBlock, 'author'),
+      work: extractTag(poemBlock, 'work'),
+      isOriginal: extractTag(poemBlock, 'isOriginal').toLowerCase() === 'true',
+    },
+    song: {
+      title: extractTag(songBlock, 'title'),
+      artist: extractTag(songBlock, 'artist'),
+      excerpt: extractTag(songBlock, 'excerpt'),
+      isParaphrase: extractTag(songBlock, 'isParaphrase').toLowerCase() === 'true',
+    },
+    memoryAnchors: extractTagItems(anchorsBlock),
+    confidence: extractTag(pageBlock, 'confidence') || 'low',
+  });
+}
+
+function extractLooseField(text, field, nextFields = []) {
+  const startMatch = new RegExp(`["']${field}["']\\s*:\\s*["']`, 'i').exec(String(text || ''));
+  if (!startMatch) return '';
+  const tail = String(text).slice(startMatch.index + startMatch[0].length);
+  if (nextFields.length) {
+    const boundary = new RegExp(`["']\\s*,\\s*["'](?:${nextFields.join('|')})["']\\s*:`, 'i').exec(tail);
+    if (boundary) return decodeLooseText(tail.slice(0, boundary.index));
+  }
+  const finalQuote = /["']\s*(?:,|}|$)/.exec(tail);
+  return decodeLooseText(finalQuote ? tail.slice(0, finalQuote.index) : tail);
+}
+
+function parseLooseJsonPage(text, type = activeType) {
+  const body = extractLooseField(text, 'body', ['poem', 'song', 'memoryAnchors', 'confidence']);
+  if (!body) return null;
+  const poemMatch = /["']poem["']\s*:\s*\{([\s\S]*?)\}\s*,\s*["']song["']\s*:/i.exec(text);
+  const songMatch = /["']song["']\s*:\s*\{([\s\S]*?)\}\s*,\s*["'](?:memoryAnchors|confidence)["']\s*:/i.exec(text);
+  const poemBlock = poemMatch?.[1] || '';
+  const songBlock = songMatch?.[1] || '';
+  const meta = PAGE_TYPES[type] || PAGE_TYPES.daily_note;
+  return normalizePage({
+    title: extractLooseField(text, 'title', ['dateLabel', 'mood', 'perspective', 'body']) || meta.label,
+    dateLabel: extractLooseField(text, 'dateLabel', ['mood', 'perspective', 'body']) || '此刻',
+    mood: extractLooseField(text, 'mood', ['perspective', 'body']) || '未命名的心绪',
+    body,
+    poem: {
+      text: extractLooseField(poemBlock, 'text', ['author', 'work', 'isOriginal']),
+      author: extractLooseField(poemBlock, 'author', ['work', 'isOriginal']),
+      work: extractLooseField(poemBlock, 'work', ['isOriginal']),
+      isOriginal: /["']isOriginal["']\s*:\s*true/i.test(poemBlock),
+    },
+    song: {
+      title: extractLooseField(songBlock, 'title', ['artist', 'excerpt', 'isParaphrase']),
+      artist: extractLooseField(songBlock, 'artist', ['excerpt', 'isParaphrase']),
+      excerpt: extractLooseField(songBlock, 'excerpt', ['isParaphrase']),
+      isParaphrase: /["']isParaphrase["']\s*:\s*true/i.test(songBlock),
+    },
+    confidence: /["']confidence["']\s*:\s*["'](high|medium|low)["']/i.exec(text)?.[1] || 'low',
+  });
+}
+
+function repairStoredPage(page) {
+  const rawBody = String(page?.body || '').trim();
+  if (!rawBody || !/^\{\s*["']title["']\s*:/i.test(rawBody) || !/["']body["']\s*:/.test(rawBody)) return page;
+  try {
+    const repaired = parseLooseJsonPage(rawBody, page.type);
+    if (!repaired || repaired.body === rawBody) return page;
+    return { ...page, ...repaired, id: page.id, type: page.type, createdAt: page.createdAt, source: page.source };
+  } catch (error) {
+    console.warn('[Private Journal] Could not repair a legacy leaked payload.', error);
+    return page;
+  }
 }
 
 function normalizePage(page) {
@@ -220,8 +343,9 @@ function buildBatchPrompt(options = {}) {
   const focus = IMPRESSION_FOCUSES[focusKey] || IMPRESSION_FOCUSES.overall;
   const customRequest = focusKey === 'custom' ? String(options.customRequest || '').trim() : '';
   const userConfirmedPartners = currentBook?.relationship?.status === 'partners' && currentBook?.relationship?.source === 'user';
+  const pageTemplate = (type, save = 'true') => `<page type="${type}" save="${save}"><title>标题</title><dateLabel>日期或此刻</dateLabel><mood>心绪</mood><body>70至120字正文</body><poem><text>1至2行短诗</text><author>作者或原创</author><work>作品名</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手</artist><excerpt>极短摘抄或意译</excerpt><isParaphrase>false</isParaphrase></song><anchors><item>依据</item></anchors><confidence>high|medium|low</confidence></page>`;
   return `正文刚刚更新。请用这一次响应同步 ${id.userName} 与 ${id.characterName} 的整本私人手札；禁止只写其中一个栏目。所有内容都属于 User 的视角，第一人称“我”只能是 ${id.userName}，Char 是被观察、共同生活或被倾诉的对象。\n\n` +
-    `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。每篇正文控制在120至260字，有具体细节，避免四篇内容互相重复。\n` +
+    `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。为确保一次响应完整返回，每篇正文严格控制在70至120字，诗歌1至2行，避免四篇互相重复。\n` +
     `印象：User 对 Char 的印象。本轮方向是“${focus.label}”：${focus.prompt}${customRequest ? ` User 的具体需求：${customRequest}` : ''}\n` +
     `相处日记：User 记录两个人在本轮及近期已经发生的日常与感受，不写成情书。\n` +
     `情书：User 直接写给 Char，“我”是 User、“你”是 Char，绝对不要反写。\n` +
@@ -229,15 +353,10 @@ function buildBatchPrompt(options = {}) {
     `恋爱日记：仅当 relationship.status 为 partners 时生成；否则 shouldSave 必须为 false。\n` +
     `每个保存页面都必须包含一首真实歌曲：song.title 与 song.artist 不可留空；歌词摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或20个中日韩字符。不确定歌词原句时保留准确歌名和歌手，excerpt 改写为意译并设置 isParaphrase=true。本轮不会发送第二次请求补字段。\n` +
     `诗歌优先公共领域；版权或出处不确定时写明确标注的原创短诗。\n\n` +
-    `只输出严格 JSON，不要 Markdown。updates 必须包含四个对象，前三个 shouldSave 必须为 true：{` +
-    `"relationship":{"status":"partners|not_partners|uncertain","reason":"简短说明","evidence":["最多3条依据"]},` +
-    `"updates":[` +
-    `{"type":"impression","shouldSave":true,"page":PAGE},` +
-    `{"type":"daily_note","shouldSave":true,"page":PAGE},` +
-    `{"type":"love_letter","shouldSave":true,"page":PAGE},` +
-    `{"type":"romance_diary","shouldSave":true或false,"page":PAGE或null}` +
-    `]}` +
-    `，其中 PAGE={"title":"页标题","dateLabel":"故事内日期或此刻","mood":"User的心绪","perspective":"user","body":"正文，分段用\\n","poem":{"text":"短诗","author":"作者或原创","work":"作品名或无题","isOriginal":false},"song":{"title":"准确歌名","artist":"歌手或创作者","excerpt":"极短摘抄或意译","isParaphrase":false},"memoryAnchors":["1至5条依据"],"confidence":"high|medium|low"}`;
+    `只输出下列标签协议，不要 JSON、Markdown 或代码围栏。标签内可以直接写引号和换行。必须按顺序完整输出 relationship、impression、daily_note、love_letter；不得写“同上”“使用相同标签”等省略语。只有伴侣关系成立时才填写 romance_diary：\n` +
+    `<journal_batch><relationship><status>partners|not_partners|uncertain</status><reason>简短说明</reason><evidence><item>依据</item></evidence></relationship>` +
+    pageTemplate('impression') + pageTemplate('daily_note') + pageTemplate('love_letter') +
+    `${pageTemplate('romance_diary', userConfirmedPartners ? 'true' : 'true或false')}</journal_batch>`;
 }
 
 function parseRelationship(raw) {
@@ -261,11 +380,18 @@ function normalizeRelationship(result = {}) {
 }
 
 function parseBatch(raw) {
-  const cleaned = String(raw || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const cleaned = stripResponseFence(raw);
+  const taggedBatch = parseTaggedBatch(cleaned);
+  if (taggedBatch) return taggedBatch;
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start < 0 || end <= start) throw new Error('批量手札没有返回有效 JSON');
-  const payload = JSON.parse(cleaned.slice(start, end + 1));
+  let payload;
+  try {
+    payload = JSON.parse(cleaned.slice(start, end + 1));
+  } catch (error) {
+    throw new Error('批量手札格式损坏，已阻止代码样式文本写入页面');
+  }
   const rawUpdates = Array.isArray(payload.updates)
     ? payload.updates
     : Object.entries(payload.updates || {}).map(([type, value]) => ({ type, ...(value || {}) }));
@@ -279,6 +405,35 @@ function parseBatch(raw) {
     })
     .map(item => ({ type: item.type, page: normalizePage(item.page) }));
   return { relationship: normalizeRelationship(payload.relationship || {}), updates };
+}
+
+function parseTaggedBatch(text) {
+  if (!/<journal_batch\b/i.test(String(text || '')) && !/<page\b[^>]*type=/i.test(String(text || ''))) return null;
+  const relationshipBlock = extractTagRaw(text, 'relationship');
+  const relationship = normalizeRelationship({
+    status: extractTag(relationshipBlock, 'status'),
+    reason: extractTag(relationshipBlock, 'reason'),
+    evidence: extractTagItems(extractTagRaw(relationshipBlock, 'evidence')),
+  });
+  const source = String(text || '');
+  const starts = [...source.matchAll(/<page\b([^>]*)>/gi)];
+  const updates = [];
+  const seenTypes = new Set();
+  for (let index = 0; index < starts.length; index += 1) {
+    const match = starts[index];
+    const attrs = match[1] || '';
+    const type = /\btype\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+    const saveValue = /\bsave\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1]?.toLowerCase();
+    if (!PAGE_TYPES[type] || saveValue === 'false' || seenTypes.has(type)) continue;
+    const contentStart = match.index + match[0].length;
+    const contentEnd = starts[index + 1]?.index ?? source.indexOf('</journal_batch>', contentStart);
+    const rawBlock = source.slice(contentStart, contentEnd >= 0 ? contentEnd : source.length).replace(/<\/page>\s*$/i, '');
+    const page = parseTaggedPage(`<page>${rawBlock}</page>`);
+    if (!page) continue;
+    seenTypes.add(type);
+    updates.push({ type, page });
+  }
+  return { relationship, updates };
 }
 
 function isRomanceUnlocked() {
@@ -477,6 +632,9 @@ async function generateBatch({ captureSignature = null } = {}) {
     const romanceAllowed = targetBook.relationship?.status === 'partners';
     const pages = batch.updates.filter(item => item.type !== 'romance_diary' || romanceAllowed);
     if (!pages.length) throw new Error('本轮批量响应没有可保存的手札内容');
+    const expectedTypes = ['impression', 'daily_note', 'love_letter', ...(romanceAllowed ? ['romance_diary'] : [])];
+    const receivedTypes = new Set(pages.map(item => item.type));
+    const missingTypes = expectedTypes.filter(type => !receivedTypes.has(type));
 
     const createdAt = new Date().toISOString();
     for (const item of pages) {
@@ -497,8 +655,14 @@ async function generateBatch({ captureSignature = null } = {}) {
     if (signature) targetBook.lastCapturedSignature = signature;
     await saveSpecificBook(targetBook, targetStorageKey);
     if (currentBook === targetBook) render();
-    setStatus(`本轮一次 API 已同步 ${pages.length} 个板块`);
-    toastr.success(`本轮手札已更新 ${pages.length} 个板块。`, '私语手札');
+    if (missingTypes.length) {
+      const missingLabels = missingTypes.map(type => PAGE_TYPES[type].label).join('、');
+      setStatus(`已保存 ${pages.length} 个板块；响应缺少：${missingLabels}`);
+      toastr.warning(`本轮只解析到 ${pages.length} 个板块，缺少：${missingLabels}。未追加 API 请求。`, '私语手札', { timeOut: 10000 });
+    } else {
+      setStatus(`本轮一次 API 已同步 ${pages.length} 个板块`);
+      toastr.success(`本轮手札已更新 ${pages.length} 个板块。`, '私语手札');
+    }
   } catch (error) {
     console.error('[Private Journal]', error);
     const message = error?.message || String(error);
