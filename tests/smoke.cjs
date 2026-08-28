@@ -49,6 +49,49 @@ const fallbackPage = vm.runInContext(`parseJson('模型返回了普通文本，�
 assert.equal(fallbackPage.title, '情书');
 assert.match(fallbackPage.body, /普通文本/);
 
+const aliasedSong = vm.runInContext(`normalizePage({
+  title: '一页',
+  body: '正文',
+  song: { name: '夜曲', singer: '周杰伦', lyric: '为你弹奏肖邦的夜曲' }
+})`, sandbox);
+assert.equal(aliasedSong.song.title, '夜曲');
+assert.equal(aliasedSong.song.artist, '周杰伦');
+
+const missingSongTitle = vm.runInContext(`normalizePage({ title: '一页', body: '正文', song: { excerpt: '一小段歌词' } })`, sandbox);
+assert.equal(missingSongTitle.song.title, '未注明歌名');
+assert.equal(missingSongTitle.song.isMissingTitle, true);
+
+const impressionPrompt = vm.runInContext(`buildPrompt('impression', { impressionFocus: 'custom', customRequest: '观察他的克制与温柔' })`, sandbox);
+assert.match(impressionPrompt, /叙述视角始终是 User/);
+assert.match(impressionPrompt, /观察他的克制与温柔/);
+assert.match(impressionPrompt, /song\.title 必须填写准确歌名/);
+
+const dailyPrompt = vm.runInContext(`buildPrompt('daily_note')`, sandbox);
+assert.match(dailyPrompt, /User 与 Char 已经发生的日常相处/);
+
+const letterPrompt = vm.runInContext(`buildPrompt('love_letter')`, sandbox);
+assert.match(letterPrompt, /User 写给 Char 的情书/);
+assert.match(letterPrompt, /绝对不要反写成 Char 给 User/);
+
+const romancePrompt = vm.runInContext(`buildPrompt('romance_diary')`, sandbox);
+assert.match(romancePrompt, /作为伴侣之后的恋爱日常/);
+
+const relationship = vm.runInContext(`parseRelationship('{"status":"partners","reason":"双方明确确认关系","evidence":["互称伴侣"]}')`, sandbox);
+assert.equal(relationship.status, 'partners');
+assert.equal(relationship.source, 'model');
+
+const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression' }] })`, sandbox);
+assert.equal(legacyBook.version, 2);
+assert.equal(legacyBook.pages[0].type, 'impression');
+
+const separatedPages = vm.runInContext(`pagesForType({ pages: [
+  { type: 'impression', title: '印象一' },
+  { type: 'love_letter', title: '情书一' },
+  { type: 'daily_note', title: '日记一' }
+] }, 'daily_note')`, sandbox);
+assert.equal(separatedPages.length, 1);
+assert.equal(separatedPages[0].title, '日记一');
+
 const fallbackId = vm.runInContext('createId()', sandbox);
 assert.match(fallbackId, /^[a-z0-9]+-[a-z0-9]+$/);
 
@@ -74,6 +117,11 @@ assert.notEqual(firstSignature, secondSignature);
   assert.equal(result, '正文 API 的返回内容');
   assert.equal(receivedOptions.quietPrompt, '写一页日记');
   assert.equal(receivedOptions.skipWIAN, false);
+
+  contextValue.generateQuietPrompt = async () => '{"title":"Moon River","artist":"Audrey Hepburn","excerpt":"Wherever you are going","isParaphrase":false}';
+  const repairedPage = await vm.runInContext(`completeMissingSong(normalizePage({ title: '一页', body: '安静的夜晚' }), 'daily_note')`, sandbox);
+  assert.equal(repairedPage.song.title, 'Moon River');
+  assert.equal(repairedPage.song.artist, 'Audrey Hepburn');
   console.log('Private Journal smoke tests passed.');
 })().catch(error => {
   console.error(error);

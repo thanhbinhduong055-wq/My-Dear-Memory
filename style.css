@@ -2,7 +2,7 @@
 #private-journal { position:fixed; inset:0; z-index:9999; display:none; color:var(--pj-ink); font-family:"Noto Serif SC","Songti SC",Georgia,serif; }
 #private-journal.open { display:block; }
 .pj-backdrop { position:absolute; inset:0; background:rgba(18,14,13,.76); backdrop-filter:blur(8px); }
-.pj-book { position:absolute; inset:4vh max(3vw,18px); max-width:1040px; margin:auto; display:grid; grid-template-rows:auto auto 1fr auto; overflow:hidden; background:var(--pj-paper); border:1px solid rgba(255,255,255,.2); border-radius:7px 18px 18px 7px; box-shadow:0 30px 100px #000b, inset 22px 0 35px #765b3922; }
+.pj-book { position:absolute; inset:4vh max(3vw,18px); max-width:1040px; margin:auto; display:grid; grid-template-rows:auto auto auto 1fr auto; overflow:hidden; background:var(--pj-paper); border:1px solid rgba(255,255,255,.2); border-radius:7px 18px 18px 7px; box-shadow:0 30px 100px #000b, inset 22px 0 35px #765b3922; }
 .pj-book::before { content:""; position:absolute; inset:0; pointer-events:none; opacity:.28; background:repeating-linear-gradient(0deg,transparent 0 27px,#845e3420 28px); }
 .pj-book nav,.pj-book footer { position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; gap:18px; padding:18px 28px; border-bottom:1px solid #8d704036; }
 .pj-book nav h1 { margin:2px 0 0; font-size:clamp(21px,3vw,34px); font-weight:500; }
@@ -12,6 +12,25 @@
 .pj-tabs { position:relative; z-index:1; display:flex; gap:8px; padding:12px 28px; overflow:auto; border-bottom:1px solid #8d704036; }
 .pj-tabs button { white-space:nowrap; padding:8px 13px; border-radius:99px; color:#6c5a4d; }
 .pj-tabs button.active { color:#fff8e8; background:var(--pj-wine); box-shadow:0 4px 14px #713c4644; }
+.pj-controls { position:relative; z-index:1; padding:14px 28px; border-bottom:1px solid #8d704024; background:#fffaf04f; }
+.pj-control-copy { display:flex; align-items:baseline; gap:14px; color:#6d594d; }
+.pj-control-copy strong { color:var(--pj-wine); font-size:13px; letter-spacing:.06em; }
+.pj-control-copy span { font-size:12px; line-height:1.65; opacity:.78; }
+.pj-choice-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:12px; }
+.pj-choice { padding:7px 12px!important; border:1px solid #8d70404a!important; border-radius:99px; font-size:12px!important; }
+.pj-choice.active { color:#fff8e8!important; border-color:var(--pj-wine)!important; background:var(--pj-wine)!important; }
+.pj-custom-request { box-sizing:border-box; width:100%; margin-top:12px; padding:10px 13px; border:1px solid #8d70404a; border-radius:5px; outline:none; color:var(--pj-ink); background:#fffaf0b8; font:13px/1.5 inherit; }
+.pj-custom-request:focus { border-color:var(--pj-wine); box-shadow:0 0 0 3px #713c4614; }
+.pj-relationship { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:2px 0; }
+.pj-relationship>div:first-child { min-width:0; }
+.pj-relationship strong { color:var(--pj-wine); }
+.pj-relationship p { margin:5px 0 0; color:#6d594d; font-size:12px; line-height:1.6; }
+.pj-relationship ul { margin:7px 0 0 22px; padding:0; color:#79675a; font-size:11px; }
+.pj-lock-mark { display:inline-grid; width:25px; height:25px; margin-right:8px; place-items:center; border-radius:50%; color:#fff8e8; background:#9a8374; }
+.pj-relationship.unlocked .pj-lock-mark { background:var(--pj-wine); }
+.pj-relationship-actions { display:flex; flex:0 0 auto; align-items:center; gap:8px; }
+.pj-relationship-actions button { padding:8px 12px!important; border-radius:4px!important; font-size:12px!important; }
+.pj-text-button { color:var(--pj-wine)!important; text-decoration:underline; text-underline-offset:3px; }
 .pj-pages { position:relative; z-index:1; overflow:auto; padding:26px clamp(20px,6vw,76px) 80px; }
 .pj-page { max-width:740px; margin:0 auto 38px; padding:34px clamp(24px,5vw,58px); background:#fffaf0b8; border:1px solid #8f744636; box-shadow:0 12px 30px #684c2b18; }
 .pj-page header { display:flex; justify-content:space-between; }
@@ -20,9 +39,14 @@
 .pj-body { margin:28px 0; line-height:2; font-size:15px; letter-spacing:.03em; }
 .pj-poem { margin:30px 0; padding:18px 22px; border-left:2px solid var(--pj-gold); color:#5c493d; line-height:1.9; background:#ac86510b; }
 .pj-poem cite { display:block; margin-top:9px; text-align:right; font-size:12px; opacity:.7; }
-.pj-song { display:grid; gap:7px; padding-top:15px; border-top:1px dashed #80643f55; color:#715f51; }
+.pj-song { display:grid; grid-template-columns:auto 1fr; align-items:baseline; gap:7px 12px; padding-top:15px; border-top:1px dashed #80643f55; color:#715f51; }
+.pj-song-title { color:var(--pj-wine); font-size:14px; }
+.pj-song-artist { font-size:12px; opacity:.7; }
 .pj-song q { font-style:italic; }
+.pj-song q,.pj-song small { grid-column:1 / -1; }
 .pj-song small { opacity:.6; }
+.pj-song-warning { color:#9a493f; opacity:1!important; }
+.pj-focus-badge { margin-left:8px; padding:3px 7px; border-radius:99px; letter-spacing:0; color:#7a6455; background:#ac86511a; }
 .pj-page details { margin-top:22px; font-size:12px; opacity:.65; }
 .pj-delete { font-size:22px!important; opacity:.35; }
 .pj-empty { margin:15vh auto; text-align:center; color:#856f61; font-size:20px; line-height:2; }
@@ -36,6 +60,6 @@
 .pj-primary { color:#fff8e8!important; background:var(--pj-wine)!important; }
 .pj-secondary { border:1px solid #856d4e77!important; }
 #private-journal-launcher { position:fixed; right:18px; bottom:118px; z-index:3000; width:44px; height:44px; border-radius:50%; border:1px solid #d7bd92; color:#fff8e8; background:#713c46; box-shadow:0 8px 24px #0006; cursor:pointer; font-size:22px; }
-@media(max-width:600px){ .pj-book{inset:0;border-radius:0}.pj-book nav,.pj-book footer{padding:14px 16px}.pj-book footer{align-items:stretch;flex-direction:column}.pj-footer-state,.pj-footer-actions{justify-content:space-between}.pj-status{max-width:50vw}.pj-tabs{padding:10px 14px}.pj-pages{padding:18px 12px 70px}.pj-page{padding:26px 20px}.pj-page h2{font-size:23px} }
+@media(max-width:600px){ .pj-book{inset:0;border-radius:0}.pj-book nav,.pj-book footer{padding:14px 16px}.pj-book footer{align-items:stretch;flex-direction:column}.pj-footer-state,.pj-footer-actions{justify-content:space-between}.pj-status{max-width:50vw}.pj-tabs{padding:10px 14px}.pj-controls{padding:12px 14px}.pj-control-copy,.pj-relationship{align-items:flex-start;flex-direction:column;gap:8px}.pj-relationship-actions{width:100%;justify-content:space-between}.pj-pages{padding:18px 12px 70px}.pj-page{padding:26px 20px}.pj-page h2{font-size:23px} }
 
 
