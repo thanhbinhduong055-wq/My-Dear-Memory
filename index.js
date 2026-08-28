@@ -38,13 +38,13 @@ const PAGE_TYPES = {
     label: '情书',
     icon: '✉',
     empty: '还没有写给对方的情书。',
-    instruction: '这是 User 写给 Char 的情书。以 User 的第一人称直接对 Char 说话，正文中的“我”是 User、“你”是 Char。绝对不要反写成 Char 给 User。',
+    instruction: '这是 User 写给 Char 的高情感浓度情书。以 User 的第一人称直接对 Char 说话，正文中的“我”是 User、“你”是 Char。写出具体的眷恋、心疼、渴望、恐惧或不舍，允许脆弱与坦白，但必须落在真实细节上，不能只堆砌华丽形容词。绝对不要反写成 Char 给 User。',
   },
   romance_diary: {
     label: '恋爱日记',
     icon: '♡',
     empty: '恋爱日记还没有落笔。',
-    instruction: '以 User 的第一人称记录 User 与 Char 作为伴侣之后的恋爱日常、关系进展与真实感受。只能使用已发生或上下文明示的内容。',
+    instruction: '以 User 的第一人称记录 User 与 Char 作为伴侣之后的恋爱日常。正文至少三分之二用于 User 的内心感受、依恋、安心、不安、占有欲、亲密需求或关系变化，事件只作为情绪的锚点。只能使用已发生或上下文明示的内容。',
   },
 };
 
@@ -303,6 +303,7 @@ function normalizePage(page) {
   const songTitle = rawSong.title || rawSong.name || rawSong.songTitle || rawSong['歌名'] || page.songTitle || '';
   const songArtist = rawSong.artist || rawSong.singer || rawSong.author || rawSong['歌手'] || page.songArtist || '';
   const songExcerpt = rawSong.excerpt || rawSong.lyric || rawSong.lyrics || rawSong['歌词摘抄'] || page.songExcerpt || '';
+  const hasSongContent = Boolean(songTitle || songArtist || songExcerpt);
   return {
     title: String(page.title || '无题'),
     dateLabel: String(page.dateLabel || '此刻'),
@@ -316,15 +317,20 @@ function normalizePage(page) {
       isOriginal: Boolean(page.poem?.isOriginal),
     },
     song: {
-      title: String(songTitle || '未提供歌曲'),
+      title: String(songTitle || (hasSongContent ? '未提供歌曲' : '')),
       artist: String(songArtist),
       excerpt: String(songExcerpt),
       isParaphrase: Boolean(rawSong.isParaphrase),
-      isMissingTitle: Boolean(!songTitle),
+      isMissingTitle: Boolean(hasSongContent && !songTitle),
     },
     memoryAnchors: Array.isArray(page.memoryAnchors) ? page.memoryAnchors.map(String).slice(0, 8) : [],
     confidence: ['high', 'medium', 'low'].includes(page.confidence) ? page.confidence : 'low',
   };
+}
+
+function normalizeAccompaniment(value = {}) {
+  const normalized = normalizePage({ title: '本轮附页', body: '', poem: value.poem, song: value.song });
+  return { poem: normalized.poem, song: normalized.song };
 }
 
 function buildRelationshipPrompt() {
@@ -343,18 +349,18 @@ function buildBatchPrompt(options = {}) {
   const focus = IMPRESSION_FOCUSES[focusKey] || IMPRESSION_FOCUSES.overall;
   const customRequest = focusKey === 'custom' ? String(options.customRequest || '').trim() : '';
   const userConfirmedPartners = currentBook?.relationship?.status === 'partners' && currentBook?.relationship?.source === 'user';
-  const pageTemplate = (type, save = 'true') => `<page type="${type}" save="${save}"><title>标题</title><dateLabel>日期或此刻</dateLabel><mood>心绪</mood><body>70至120字正文</body><poem><text>1至2行短诗</text><author>作者或原创</author><work>作品名</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手</artist><excerpt>极短摘抄或意译</excerpt><isParaphrase>false</isParaphrase></song><anchors><item>依据</item></anchors><confidence>high|medium|low</confidence></page>`;
+  const pageTemplate = (type, save = 'true') => `<page type="${type}" save="${save}"><title>标题</title><dateLabel>日期或此刻</dateLabel><mood>心绪</mood><body>按栏目要求完成的正文</body><anchors><item>依据</item></anchors><confidence>high|medium|low</confidence></page>`;
+  const accompanimentTemplate = `<round_accompaniment><poem><text>1至2行短诗</text><author>作者或原创</author><work>作品名</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手</artist><excerpt>极短摘抄或意译</excerpt><isParaphrase>false</isParaphrase></song></round_accompaniment>`;
   return `正文刚刚更新。请用这一次响应同步 ${id.userName} 与 ${id.characterName} 的整本私人手札；禁止只写其中一个栏目。所有内容都属于 User 的视角，第一人称“我”只能是 ${id.userName}，Char 是被观察、共同生活或被倾诉的对象。\n\n` +
-    `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。为确保一次响应完整返回，每篇正文严格控制在70至120字，诗歌1至2行，避免四篇互相重复。\n` +
-    `印象：User 对 Char 的印象。本轮方向是“${focus.label}”：${focus.prompt}${customRequest ? ` User 的具体需求：${customRequest}` : ''}\n` +
-    `相处日记：User 记录两个人在本轮及近期已经发生的日常与感受，不写成情书。\n` +
-    `情书：User 直接写给 Char，“我”是 User、“你”是 Char，绝对不要反写。\n` +
+    `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。避免四篇互相重复。\n` +
+    `印象：70至110字。User 对 Char 的印象。本轮方向是“${focus.label}”：${focus.prompt}${customRequest ? ` User 的具体需求：${customRequest}` : ''}\n` +
+    `相处日记：70至110字。User 记录两个人在本轮及近期已经发生的日常与感受，不写成情书。\n` +
+    `情书：130至200字。User 直接写给 Char，“我”是 User、“你”是 Char，绝对不要反写。情感浓度必须明显高于其他栏目，写出具体的眷恋、心疼、渴望、恐惧或不舍；允许脆弱和坦白，但不堆砌空泛辞藻。\n` +
     `关系判定：只有已明确确认恋爱、情侣、伴侣或配偶关系才是 partners；暧昧、调情、单恋和角色卡倾向都不算。${userConfirmedPartners ? 'User 已手动确认双方是伴侣，relationship.status 必须保持 partners。' : ''}\n` +
-    `恋爱日记：仅当 relationship.status 为 partners 时生成；否则 shouldSave 必须为 false。\n` +
-    `每个保存页面都必须包含一首真实歌曲：song.title 与 song.artist 不可留空；歌词摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或20个中日韩字符。不确定歌词原句时保留准确歌名和歌手，excerpt 改写为意译并设置 isParaphrase=true。本轮不会发送第二次请求补字段。\n` +
-    `诗歌优先公共领域；版权或出处不确定时写明确标注的原创短诗。\n\n` +
+    `恋爱日记：120至180字。仅当 relationship.status 为 partners 时生成；否则 save 必须为 false。正文至少三分之二描写 User 的内心情感、依恋、亲密需求与关系变化，事件叙述最多占三分之一。\n` +
+    `整轮只生成一次共享诗词与歌曲，放进 round_accompaniment；四个 page 内禁止再写 poem 或 song。共享歌曲的 title 与 artist 不可留空；歌词摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或20个中日韩字符。不确定歌词原句时保留准确歌名和歌手，excerpt 改为意译并设置 isParaphrase=true。本轮不会发送第二次请求补字段。诗歌优先公共领域，出处不确定时写明确标注的原创短诗。\n\n` +
     `只输出下列标签协议，不要 JSON、Markdown 或代码围栏。标签内可以直接写引号和换行。必须按顺序完整输出 relationship、impression、daily_note、love_letter；不得写“同上”“使用相同标签”等省略语。只有伴侣关系成立时才填写 romance_diary：\n` +
-    `<journal_batch><relationship><status>partners|not_partners|uncertain</status><reason>简短说明</reason><evidence><item>依据</item></evidence></relationship>` +
+    `<journal_batch><relationship><status>partners|not_partners|uncertain</status><reason>简短说明</reason><evidence><item>依据</item></evidence></relationship>` + accompanimentTemplate +
     pageTemplate('impression') + pageTemplate('daily_note') + pageTemplate('love_letter') +
     `${pageTemplate('romance_diary', userConfirmedPartners ? 'true' : 'true或false')}</journal_batch>`;
 }
@@ -404,7 +410,11 @@ function parseBatch(raw) {
       return true;
     })
     .map(item => ({ type: item.type, page: normalizePage(item.page) }));
-  return { relationship: normalizeRelationship(payload.relationship || {}), updates };
+  const legacyCompanionPage = updates.find(item => item.page.poem?.text || item.page.song?.title)?.page;
+  const accompaniment = normalizeAccompaniment(
+    payload.round_accompaniment || payload.roundAccompaniment || payload.accompaniment || legacyCompanionPage || {},
+  );
+  return { relationship: normalizeRelationship(payload.relationship || {}), accompaniment, updates };
 }
 
 function parseTaggedBatch(text) {
@@ -414,6 +424,23 @@ function parseTaggedBatch(text) {
     status: extractTag(relationshipBlock, 'status'),
     reason: extractTag(relationshipBlock, 'reason'),
     evidence: extractTagItems(extractTagRaw(relationshipBlock, 'evidence')),
+  });
+  const accompanimentBlock = extractTagRaw(text, 'round_accompaniment') || extractTagRaw(text, 'accompaniment');
+  const accompanimentPoem = extractTagRaw(accompanimentBlock, 'poem');
+  const accompanimentSong = extractTagRaw(accompanimentBlock, 'song');
+  const accompaniment = normalizeAccompaniment({
+    poem: {
+      text: extractTag(accompanimentPoem, 'text'),
+      author: extractTag(accompanimentPoem, 'author'),
+      work: extractTag(accompanimentPoem, 'work'),
+      isOriginal: extractTag(accompanimentPoem, 'isOriginal').toLowerCase() === 'true',
+    },
+    song: {
+      title: extractTag(accompanimentSong, 'title'),
+      artist: extractTag(accompanimentSong, 'artist'),
+      excerpt: extractTag(accompanimentSong, 'excerpt'),
+      isParaphrase: extractTag(accompanimentSong, 'isParaphrase').toLowerCase() === 'true',
+    },
   });
   const source = String(text || '');
   const starts = [...source.matchAll(/<page\b([^>]*)>/gi)];
@@ -433,7 +460,7 @@ function parseTaggedBatch(text) {
     seenTypes.add(type);
     updates.push({ type, page });
   }
-  return { relationship, updates };
+  return { relationship, accompaniment, updates };
 }
 
 function isRomanceUnlocked() {
@@ -637,13 +664,26 @@ async function generateBatch({ captureSignature = null } = {}) {
     const missingTypes = expectedTypes.filter(type => !receivedTypes.has(type));
 
     const createdAt = new Date().toISOString();
+    const roundId = createId();
+    const accompaniment = batch.accompaniment || normalizeAccompaniment();
+    const hasAccompaniment = Boolean(accompaniment.poem?.text || accompaniment.song?.title || accompaniment.song?.excerpt);
+    const accompanimentOwner = pages.find(item => item.type === 'daily_note') || pages[0];
     for (const item of pages) {
       const page = item.page;
       page.id = createId();
       page.type = item.type;
+      page.roundId = roundId;
       page.createdAt = createdAt;
       page.source = 'auto-batch';
       page.captureSignature = signature;
+      page.poem = { text: '', author: '', work: '', isOriginal: false };
+      page.song = { title: '', artist: '', excerpt: '', isParaphrase: false, isMissingTitle: false };
+      page.hasRoundAccompaniment = false;
+      if (hasAccompaniment && item === accompanimentOwner) {
+        page.poem = accompaniment.poem;
+        page.song = accompaniment.song;
+        page.hasRoundAccompaniment = true;
+      }
       if (item.type === 'impression') {
         page.impressionFocus = focusKey;
         page.impressionFocusLabel = focusKey === 'custom'
@@ -724,9 +764,12 @@ function renderPage(page) {
   const anchors = page.memoryAnchors?.length
     ? `<div class="pj-anchors"><strong>记忆锚点</strong><ul>${page.memoryAnchors.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>`
     : '';
+  const accompanimentLabel = page.hasRoundAccompaniment && (poem || song)
+    ? '<div class="pj-companion-label">本轮诗笺与配乐 · 全册仅此一份</div>'
+    : '';
   return `<details class="pj-page">
     <summary><span class="pj-summary-copy"><span class="pj-kicker">${type.icon} ${escapeHtml(type.label)} ${focus}</span><span class="pj-page-title">${escapeHtml(page.title)}</span><span class="pj-meta">${escapeHtml(page.dateLabel)} · ${escapeHtml(page.mood)} · 依据可信度 ${escapeHtml(page.confidence)}</span></span><button class="pj-delete" data-delete="${escapeHtml(page.id)}" title="删除" aria-label="删除本页">×</button></summary>
-    <div class="pj-page-content"><div class="pj-body">${escapeHtml(page.body).replace(/\n/g, '<br>')}</div>${poem}${song}${anchors}</div>
+    <div class="pj-page-content"><div class="pj-body">${escapeHtml(page.body).replace(/\n/g, '<br>')}</div>${accompanimentLabel}${poem}${song}${anchors}</div>
   </details>`;
 }
 

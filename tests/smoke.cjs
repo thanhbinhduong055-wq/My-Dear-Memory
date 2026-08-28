@@ -86,11 +86,13 @@ const dailyPrompt = vm.runInContext(`buildPrompt('daily_note')`, sandbox);
 assert.match(dailyPrompt, /User 与 Char 已经发生的日常相处/);
 
 const letterPrompt = vm.runInContext(`buildPrompt('love_letter')`, sandbox);
-assert.match(letterPrompt, /User 写给 Char 的情书/);
+assert.match(letterPrompt, /User 写给 Char 的高情感浓度情书/);
 assert.match(letterPrompt, /绝对不要反写成 Char 给 User/);
+assert.match(letterPrompt, /高情感浓度/);
 
 const romancePrompt = vm.runInContext(`buildPrompt('romance_diary')`, sandbox);
 assert.match(romancePrompt, /作为伴侣之后的恋爱日常/);
+assert.match(romancePrompt, /至少三分之二/);
 
 const relationship = vm.runInContext(`parseRelationship('{"status":"partners","reason":"双方明确确认关系","evidence":["互称伴侣"]}')`, sandbox);
 assert.equal(relationship.status, 'partners');
@@ -100,13 +102,20 @@ const batchPrompt = vm.runInContext(`buildBatchPrompt({ impressionFocus: 'person
 assert.match(batchPrompt, /禁止只写其中一个栏目/);
 assert.match(batchPrompt, /必须按顺序完整输出/);
 assert.match(batchPrompt, /本轮不会发送第二次请求补字段/);
+assert.match(batchPrompt, /情感浓度必须明显高于其他栏目/);
+assert.match(batchPrompt, /正文至少三分之二描写 User 的内心情感/);
+assert.equal((batchPrompt.match(/<round_accompaniment>/g) || []).length, 1);
+assert.equal((batchPrompt.match(/<song>/g) || []).length, 1);
 
-const taggedBatch = vm.runInContext(`parseBatch('<journal_batch><relationship><status>uncertain</status><reason>证据不足</reason><evidence><item>尚未确认</item></evidence></relationship><page type="impression"><title>印象</title><body>他很克制。</body><song><title>夜曲</title><artist>周杰伦</artist><excerpt>一小段</excerpt></song></page><page type="daily_note"><title>日常</title><body>我们一起吃饭。</body><song><title>稻香</title><artist>周杰伦</artist><excerpt>还记得你说家是唯一的城堡</excerpt></song></page><page type="love_letter"><title>给你</title><body>我想你平安。</body><song><title>Moon River</title><artist>Audrey Hepburn</artist><excerpt>Two drifters</excerpt></song></page><page type="romance_diary" save="false"></page></journal_batch>')`, sandbox);
+const taggedBatch = vm.runInContext(`parseBatch('<journal_batch><relationship><status>uncertain</status><reason>证据不足</reason><evidence><item>尚未确认</item></evidence></relationship><round_accompaniment><poem><text>一行诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>夜曲</title><artist>周杰伦</artist><excerpt>一小段</excerpt><isParaphrase>false</isParaphrase></song></round_accompaniment><page type="impression"><title>印象</title><body>他很克制。</body></page><page type="daily_note"><title>日常</title><body>我们一起吃饭。</body></page><page type="love_letter"><title>给你</title><body>我想你平安。</body></page><page type="romance_diary" save="false"></page></journal_batch>')`, sandbox);
 assert.equal(taggedBatch.updates.length, 3);
 assert.deepEqual(Array.from(taggedBatch.updates, item => item.type), ['impression', 'daily_note', 'love_letter']);
+assert.equal(taggedBatch.accompaniment.song.title, '夜曲');
+assert.equal(taggedBatch.accompaniment.poem.text, '一行诗');
 
 const batchResult = vm.runInContext(`parseBatch(JSON.stringify({
   relationship: { status: 'uncertain', reason: '证据不足', evidence: [] },
+  accompaniment: { poem: { text: '短诗', author: '原创' }, song: { title: '稻香', artist: '周杰伦', excerpt: '回家吧' } },
   updates: [
     { type: 'impression', shouldSave: true, page: { title: '印象', body: '他很安静。' } },
     { type: 'daily_note', shouldSave: true, page: { title: '日常', body: '我们聊了很久。' } },
@@ -116,6 +125,7 @@ const batchResult = vm.runInContext(`parseBatch(JSON.stringify({
 }))`, sandbox);
 assert.equal(batchResult.updates.length, 3);
 assert.equal(batchResult.relationship.status, 'uncertain');
+assert.equal(batchResult.accompaniment.song.title, '稻香');
 
 const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression' }] })`, sandbox);
 assert.equal(legacyBook.version, 3);
@@ -132,11 +142,13 @@ assert.equal(separatedPages[0].title, '日记一');
 const foldedPageHtml = vm.runInContext(`renderPage({
   id: 'page-1', type: 'daily_note', title: '折叠标题', dateLabel: '此刻', mood: '安静',
   body: '折叠正文', confidence: 'high', memoryAnchors: [],
-  poem: { text: '', author: '', work: '' }, song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Two drifters' }
+  hasRoundAccompaniment: true, poem: { text: '一行诗', author: '原创', work: '无题' },
+  song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Two drifters' }
 })`, sandbox);
 assert.match(foldedPageHtml, /^<details class="pj-page">/);
 assert.doesNotMatch(foldedPageHtml, /<details class="pj-page" open>/);
 assert.match(foldedPageHtml, /<summary>/);
+assert.match(foldedPageHtml, /本轮诗笺与配乐 · 全册仅此一份/);
 
 const fallbackId = vm.runInContext('createId()', sandbox);
 assert.match(fallbackId, /^[a-z0-9]+-[a-z0-9]+$/);
@@ -169,10 +181,11 @@ assert.notEqual(firstSignature, secondSignature);
     batchApiCalls += 1;
     return JSON.stringify({
       relationship: { status: 'uncertain', reason: '证据不足', evidence: [] },
+      accompaniment: { poem: { text: '一行短诗', author: '原创' }, song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Wherever you are going' } },
       updates: [
-        { type: 'impression', shouldSave: true, page: { title: '印象', body: '他的语气很轻。', song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Wherever you are going' } } },
-        { type: 'daily_note', shouldSave: true, page: { title: '日常', body: '我们聊到深夜。', song: { title: '夜空中最亮的星', artist: '逃跑计划', excerpt: '夜空中最亮的星' } } },
-        { type: 'love_letter', shouldSave: true, page: { title: '给你', body: '我想让你知道。', song: { title: '告白气球', artist: '周杰伦', excerpt: '亲爱的爱上你' } } },
+        { type: 'impression', shouldSave: true, page: { title: '印象', body: '他的语气很轻。' } },
+        { type: 'daily_note', shouldSave: true, page: { title: '日常', body: '我们聊到深夜。' } },
+        { type: 'love_letter', shouldSave: true, page: { title: '给你', body: '我想让你知道。' } },
         { type: 'romance_diary', shouldSave: false, page: null },
       ],
     });
@@ -181,6 +194,9 @@ assert.notEqual(firstSignature, secondSignature);
   await vm.runInContext(`generateBatch({ captureSignature: 'one-main-message' })`, sandbox);
   assert.equal(batchApiCalls, 1);
   assert.equal(vm.runInContext('currentBook.pages.length', sandbox), 3);
+  assert.equal(vm.runInContext(`currentBook.pages.filter(page => page.song?.title === 'Moon River').length`, sandbox), 1);
+  assert.equal(vm.runInContext(`currentBook.pages.find(page => page.type === 'daily_note').hasRoundAccompaniment`, sandbox), true);
+  assert.equal(vm.runInContext(`currentBook.pages.find(page => page.type === 'love_letter').song.title`, sandbox), '');
   console.log('Private Journal smoke tests passed.');
 })().catch(error => {
   console.error(error);
