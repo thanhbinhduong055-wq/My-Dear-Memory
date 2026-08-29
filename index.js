@@ -101,11 +101,12 @@ function storageKey() {
 function blankBook() {
   const id = identity();
   return {
-    version: 4,
+    version: 5,
     ...id,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     relationship: { status: 'unchecked', reason: '', evidence: [], checkedAt: null, source: null },
+    timeline: { currentDayKey: null, currentDayLabel: '', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
     pages: [],
   };
 }
@@ -118,7 +119,7 @@ async function loadBook() {
 }
 
 function migrateBook(book) {
-  book.version = 4;
+  book.version = 5;
   book.pages = Array.isArray(book.pages) ? book.pages : [];
   book.pages = book.pages.map(page => {
     if (page.type === 'first_impression') {
@@ -135,6 +136,10 @@ function migrateBook(book) {
   book.relationship = Object.assign(
     { status: 'unchecked', reason: '', evidence: [], checkedAt: null, source: null },
     book.relationship || {},
+  );
+  book.timeline = Object.assign(
+    { currentDayKey: null, currentDayLabel: '', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
+    book.timeline || {},
   );
   return book;
 }
@@ -383,7 +388,7 @@ function buildBatchPrompt(options = {}) {
   const initialImpression = isInitialImpression();
   const pageTemplate = (type, save = 'true') => `<page type="${type}" save="${save}"><title>标题</title><dateLabel>日期或此刻</dateLabel><mood>心绪</mood><body>按栏目要求完成的正文</body><anchors><item>依据</item></anchors><confidence>high|medium|low</confidence></page>`;
   const accompanimentTemplate = `<round_accompaniment><poem><text>1至2行短诗</text><author>作者或原创</author><work>作品名</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手</artist><excerpt>极短摘抄或意译</excerpt><translation>对应的简短中文翻译或释义</translation><isParaphrase>false</isParaphrase></song></round_accompaniment>`;
-  return `正文刚刚更新。请用这一次响应同步 ${id.userName} 与 ${id.characterName} 的整本私人手札；禁止只写其中一个栏目。所有内容都属于 User 的视角，第一人称“我”只能是 ${id.userName}，Char 是被观察、共同生活或被倾诉的对象。\n\n` +
+  return `故事时间刚刚跨入新的一天。请用这一次响应整理刚刚结束的完整故事日，并同步 ${id.userName} 与 ${id.characterName} 的整本私人手札；禁止只写其中一个栏目。若最新一条正文已经进入新一天，只把它当作跨日标记，不要把尚未发生完的新一天扩写进日记。所有内容都属于 User 的视角，第一人称“我”只能是 ${id.userName}，Char 是被观察、共同生活或被倾诉的对象。\n\n` +
     `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。避免四篇互相重复。\n` +
     `User 声音：先从 User Persona 和 User 的实际聊天发言归纳用词、句长、语气强弱、幽默感、克制程度、称呼习惯与表达禁区，四篇都必须像 User 本人会写出的文字；不得套用 Char 口吻或通用言情模板。资料不足时使用自然克制的第一人称。\n` +
     `${initialImpression ? '初印象：这是 Char 第一次进入手札，必须写“初印象”，只记录 User 在最早接触与当前有限认知下最先注意到的特质，不得写成长期总结。' : '印象：写 User 在持续相处后对 Char 新增或改变的认识。'} 70至110字。本轮方向是“${focus.label}”：${focus.prompt}${customRequest ? ` User 的具体需求：${customRequest}` : ''}\n` +
@@ -509,6 +514,10 @@ function createId() {
 }
 
 function latestAssistantSignature() {
+  return latestAssistantInfo()?.signature || null;
+}
+
+function latestAssistantInfo() {
   const context = ctx();
   const chat = Array.isArray(context.chat) ? context.chat : [];
   for (let index = chat.length - 1; index >= 0; index -= 1) {
@@ -517,10 +526,82 @@ function latestAssistantSignature() {
       const content = String(message.mes);
       let hash = 0;
       for (let i = 0; i < content.length; i += 1) hash = ((hash << 5) - hash + content.charCodeAt(i)) | 0;
-      return `${identity().chatId}:${index}:${message.swipe_id ?? 0}:${hash}`;
+      return {
+        signature: `${identity().chatId}:${index}:${message.swipe_id ?? 0}:${hash}`,
+        content,
+        index,
+      };
     }
   }
   return null;
+}
+
+function detectStoryDayMarker(content = '') {
+  const head = String(content)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/^[\s\u3000*_#>`「」『』“”'"【】\[\]（）()—-]+/, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 180);
+  if (!head) return null;
+
+  const fullDate = /(?:^|[【\[(（\s])((?:19|20)\d{2})[年\/.\-](\d{1,2})[月\/.\-](\d{1,2})日?/.exec(head);
+  if (fullDate && fullDate.index <= 36) {
+    const year = fullDate[1];
+    const month = fullDate[2].padStart(2, '0');
+    const day = fullDate[3].padStart(2, '0');
+    return { type: 'absolute', key: `date:${year}-${month}-${day}`, label: `${year}年${Number(month)}月${Number(day)}日` };
+  }
+
+  const monthDay = /(?:^|[【\[(（\s])(\d{1,2})月(\d{1,2})日/.exec(head);
+  if (monthDay && monthDay.index <= 36) {
+    const month = monthDay[1].padStart(2, '0');
+    const day = monthDay[2].padStart(2, '0');
+    return { type: 'absolute', key: `date:unknown-${month}-${day}`, label: `${Number(month)}月${Number(day)}日` };
+  }
+
+  const relative = /^(?:[【\[(（][^】\])）]{0,24}[】\])）]\s*)?(次日|翌日|第二天|隔天|又过了一天|新的一天|第二日|次晨|翌晨)(?:[】\])）]\s*)?(?:清晨|早晨|早上|上午|中午|午后|傍晚|晚上|夜里)?(?:[】\])）]\s*)?(?:[，。,:：\s]|$)/.exec(head);
+  if (relative) return { type: 'relative', key: null, label: relative[1] };
+  return null;
+}
+
+function observeStoryDay(book, assistantInfo) {
+  book.timeline = Object.assign(
+    { currentDayKey: null, currentDayLabel: '', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
+    book.timeline || {},
+  );
+  const timeline = book.timeline;
+  const signature = assistantInfo?.signature || null;
+  if (!signature || timeline.lastObservedSignature === signature) {
+    return { shouldUpdate: false, reason: 'duplicate', marker: null };
+  }
+
+  const marker = detectStoryDayMarker(assistantInfo.content);
+  timeline.lastObservedSignature = signature;
+  if (!timeline.currentDayKey) {
+    timeline.currentDayKey = marker?.type === 'absolute' ? marker.key : 'story-day:0';
+    timeline.currentDayLabel = marker?.label || '当前故事日';
+    return { shouldUpdate: false, reason: 'baseline', marker };
+  }
+
+  if (!marker) return { shouldUpdate: false, reason: 'same-day', marker: null };
+  if (marker.type === 'absolute') {
+    if (timeline.currentDayKey === marker.key) return { shouldUpdate: false, reason: 'same-day', marker };
+    if (timeline.currentDayKey === 'story-day:0') {
+      timeline.currentDayKey = marker.key;
+      timeline.currentDayLabel = marker.label;
+      return { shouldUpdate: false, reason: 'dated-baseline', marker };
+    }
+    const completedDayLabel = timeline.currentDayLabel || '上一故事日';
+    timeline.currentDayKey = marker.key;
+    timeline.currentDayLabel = marker.label;
+    return { shouldUpdate: true, reason: 'absolute-boundary', marker, completedDayLabel };
+  }
+
+  const completedDayLabel = timeline.currentDayLabel || '上一故事日';
+  timeline.daySequence = Number(timeline.daySequence || 0) + 1;
+  timeline.currentDayKey = `story-day:${timeline.daySequence}`;
+  timeline.currentDayLabel = marker.label;
+  return { shouldUpdate: true, reason: 'relative-boundary', marker, completedDayLabel };
 }
 
 function setStatus(message) {
@@ -674,13 +755,13 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
 }
 
 async function generateBatch({ captureSignature = null } = {}) {
-  if (!ctx().chatId && !ctx().getCurrentChatId?.()) return;
-  if (journalGenerationActive || mainGenerationActive) return;
+  if (!ctx().chatId && !ctx().getCurrentChatId?.()) return false;
+  if (journalGenerationActive || mainGenerationActive) return false;
 
   const targetBook = currentBook;
   const targetStorageKey = storageKey();
   const signature = captureSignature || latestAssistantSignature();
-  if (signature && targetBook?.lastCapturedSignature === signature) return;
+  if (signature && targetBook?.lastCapturedSignature === signature) return false;
 
   const focusKey = activeImpressionFocus === 'custom' && !customImpressionRequest.trim()
     ? 'overall'
@@ -732,6 +813,7 @@ async function generateBatch({ captureSignature = null } = {}) {
       }
       targetBook.pages.unshift(page);
     }
+    if (targetBook.timeline?.currentDayKey) targetBook.timeline.lastUpdatedDayKey = targetBook.timeline.currentDayKey;
     if (signature) targetBook.lastCapturedSignature = signature;
     await saveSpecificBook(targetBook, targetStorageKey);
     if (currentBook === targetBook) render();
@@ -743,11 +825,13 @@ async function generateBatch({ captureSignature = null } = {}) {
       setStatus(`本轮一次 API 已同步 ${pages.length} 个板块`);
       toastr.success(`本轮手札已更新 ${pages.length} 个板块。`, '私语手札');
     }
+    return true;
   } catch (error) {
     console.error('[Private Journal]', error);
     const message = error?.message || String(error);
     setStatus(`批量更新失败：${message}`);
     toastr.error(`批量更新失败：${message}`, '私语手札', { timeOut: 10000 });
+    return false;
   } finally {
     journalGenerationActive = false;
     setGeneratingUi(false);
@@ -758,7 +842,8 @@ function scheduleAutoGeneration() {
   if ((!getSettings().followMainGeneration && !queuedType) || journalGenerationActive || !mainGenerationCycleSeen) return;
   clearTimeout(autoGenerationTimer);
   autoGenerationTimer = setTimeout(async () => {
-    const signature = latestAssistantSignature();
+    const assistantInfo = latestAssistantInfo();
+    const signature = assistantInfo?.signature || null;
     const hasNewAssistantContent = signature && signature !== mainGenerationStartSignature;
     if (!signature || currentBook?.lastCapturedSignature === signature || (!hasNewAssistantContent && !queuedType)) {
       mainGenerationCycleSeen = false;
@@ -767,10 +852,21 @@ function scheduleAutoGeneration() {
     const requestedType = queuedType;
     queuedType = null;
     mainGenerationCycleSeen = false;
-    if (getSettings().followMainGeneration) {
-      await generateBatch({ captureSignature: signature });
-    } else if (requestedType) {
+    if (requestedType) {
       await generatePage({ type: requestedType, source: 'manual', captureSignature: signature });
+      return;
+    }
+    if (getSettings().followMainGeneration) {
+      const decision = observeStoryDay(currentBook, assistantInfo);
+      await saveBook();
+      if (decision.shouldUpdate) {
+        setStatus(`已跨日，正在整理${decision.completedDayLabel || '上一故事日'}…`);
+        await generateBatch({ captureSignature: signature });
+      } else if (decision.reason === 'baseline' || decision.reason === 'dated-baseline') {
+        setStatus('已建立故事日基线；跨日后自动整理');
+      } else {
+        setStatus('正在收集当天故事；跨日后再更新');
+      }
     }
   }, 500);
 }
@@ -896,7 +992,9 @@ function render() {
   const id = identity();
   root.querySelector('.pj-title').textContent = `${id.userName} × ${id.characterName}`;
   root.querySelector('.pj-tabs').innerHTML = Object.entries(PAGE_TYPES).map(([key, value]) =>
-    `<button class="${key === activeType ? 'active' : ''}" data-type="${key}">${value.icon} ${value.label}${key === 'romance_diary' && !isRomanceUnlocked() ? ' · 锁定' : ''}</button>`).join('');
+    `<button class="${key === activeType ? 'active' : ''}" data-type="${key}" role="tab" aria-selected="${key === activeType}"><span>${value.icon}</span>${value.label}${key === 'romance_diary' && !isRomanceUnlocked() ? '<small>锁</small>' : ''}</button>`).join('');
+  const bookmarkLabel = root.querySelector('.pj-bookmark-label');
+  if (bookmarkLabel) bookmarkLabel.textContent = PAGE_TYPES[activeType]?.label || '手札';
   renderControls();
   const visiblePages = pagesForType(currentBook, activeType);
   root.querySelector('.pj-pages').innerHTML = visiblePages.length
@@ -965,7 +1063,7 @@ function bind() {
     if (event.target.matches('[data-setting="followMainGeneration"]')) {
       getSettings().followMainGeneration = event.target.checked;
       ctx().saveSettingsDebounced?.();
-      setStatus(event.target.checked ? '已开启：正文后一次请求同步全部栏目' : '已关闭自动同步');
+      setStatus(event.target.checked ? '已开启：故事跨日后一次整理全部栏目' : '已关闭自动整理');
     }
   });
 }
@@ -1056,21 +1154,22 @@ async function initialize() {
   root = document.createElement('section');
   root.id = 'private-journal';
   root.innerHTML = `<div class="pj-backdrop" data-action="close"></div><div class="pj-scene">
+    <button class="pj-scene-close" data-action="close" aria-label="关闭私语手札" title="关闭">×</button>
     <aside class="pj-poem-note" hidden aria-label="本轮诗句"><span class="pj-note-tape"></span><div class="pj-note-mark">❝</div><div class="pj-note-text"></div><div class="pj-note-source"></div></aside>
     <div class="pj-book-stage">
       <button class="pj-cover" data-action="toggle-book" aria-label="翻开或合上手札">
-        <span class="pj-cover-face pj-cover-front"><span class="pj-cover-shade"></span><span class="pj-cover-names"><span class="pj-cover-user"></span><i>×</i><span class="pj-cover-character"></span></span></span>
+        <span class="pj-cover-face pj-cover-front"><span class="pj-cover-shade"></span><span class="pj-cover-names"><span class="pj-cover-user"></span><i>×</i><span class="pj-cover-character"></span></span><span class="pj-cover-hint">轻触封面 · 翻开手札</span></span>
         <span class="pj-cover-face pj-cover-back"></span>
       </button>
       <div class="pj-book">
-        <div class="pj-bookmark" aria-hidden="true"><span>MEMORY</span><i></i></div>
+        <button class="pj-bookmark" data-action="toggle-book" aria-label="合上手札" title="合上手札"><span class="pj-bookmark-label">印象</span><i></i></button>
         <div class="pj-page-turner" aria-hidden="true"></div>
-        <nav><h1 class="pj-title"></h1><button data-action="close" aria-label="关闭">×</button></nav>
-        <div class="pj-tabs"></div><div class="pj-controls"></div><main class="pj-pages"></main>
-        <footer><div class="pj-footer-state"><label><input type="checkbox" data-setting="followMainGeneration"> 随正文更新</label><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">导出</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
+        <nav><div><span class="pj-nav-kicker">PRIVATE NOTES</span><h1 class="pj-title"></h1></div><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
+        <div class="pj-tabs" role="tablist" aria-label="书签目录"></div><div class="pj-controls"></div><main class="pj-pages"></main>
+        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">导出</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
       </div>
     </div>
-    <aside class="pj-ipad" hidden aria-label="本轮音乐歌词"><div class="pj-ipad-camera"></div><div class="pj-ipad-screen"><div class="pj-music-app"><span class="pj-cloud-dot"></span>网易云音乐</div><div class="pj-record"><div class="pj-record-label">♪</div></div><h3 class="pj-music-title"></h3><p class="pj-music-artist"></p><q class="pj-music-lyric"></q><p class="pj-music-translation"></p><div class="pj-progress"><i></i></div><div class="pj-player-controls"><span>‹</span><b>Ⅱ</b><span>›</span></div><div class="pj-ipad-home"></div></div></aside>
+    <aside class="pj-ipad" hidden aria-label="本轮音乐歌词"><div class="pj-ipad-camera"></div><div class="pj-ipad-screen"><div class="pj-music-app"><span class="pj-cloud-dot">♫</span><span>网易云音乐</span><b>•••</b></div><div class="pj-record"><div class="pj-record-label">♪</div></div><div class="pj-now-playing">NOW PLAYING</div><h3 class="pj-music-title"></h3><p class="pj-music-artist"></p><q class="pj-music-lyric"></q><p class="pj-music-translation"></p><div class="pj-progress"><i></i></div><div class="pj-player-controls"><span>‹</span><b>Ⅱ</b><span>›</span></div><div class="pj-ipad-home"></div></div></aside>
     <div class="pj-theme-switcher" role="group" aria-label="选择手札主题"></div>
   </div>`;
   document.body.append(root);
