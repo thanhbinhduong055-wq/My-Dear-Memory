@@ -40,6 +40,9 @@ const sandbox = {
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'index.js' });
 
+assert.equal(vm.runInContext('Object.keys(THEMES).length', sandbox), 5);
+assert.equal(vm.runInContext('DEFAULTS.theme', sandbox), 'botanical-noir');
+
 const strictPage = vm.runInContext(`parseJson('{"title":"雨后","body":"我们回到了屋檐下。"}', 'daily_note')`, sandbox);
 assert.equal(strictPage.title, '雨后');
 assert.equal(strictPage.body, '我们回到了屋檐下。');
@@ -52,19 +55,21 @@ assert.match(fallbackPage.body, /普通文本/);
 const aliasedSong = vm.runInContext(`normalizePage({
   title: '一页',
   body: '正文',
-  song: { name: '夜曲', singer: '周杰伦', lyric: '为你弹奏肖邦的夜曲' }
+  song: { name: '夜曲', singer: '周杰伦', lyric: '为你弹奏肖邦的夜曲', translationZh: '为你轻轻奏响一支夜曲' }
 })`, sandbox);
 assert.equal(aliasedSong.song.title, '夜曲');
 assert.equal(aliasedSong.song.artist, '周杰伦');
+assert.equal(aliasedSong.song.translation, '为你轻轻奏响一支夜曲');
 
 const missingSongTitle = vm.runInContext(`normalizePage({ title: '一页', body: '正文', song: { excerpt: '一小段歌词' } })`, sandbox);
 assert.equal(missingSongTitle.song.title, '未提供歌曲');
 assert.equal(missingSongTitle.song.isMissingTitle, true);
 
-const taggedPage = vm.runInContext(`parseJson('<journal_page><title>雨夜</title><dateLabel>此刻</dateLabel><mood>担心</mood><body>我希望你平安回来。</body><poem><text>一行短诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>Moon River</title><artist>Audrey Hepburn</artist><excerpt>Two drifters</excerpt><isParaphrase>false</isParaphrase></song><anchors><item>他受伤了</item></anchors><confidence>high</confidence></journal_page>', 'love_letter')`, sandbox);
+const taggedPage = vm.runInContext(`parseJson('<journal_page><title>雨夜</title><dateLabel>此刻</dateLabel><mood>担心</mood><body>我希望你平安回来。</body><poem><text>一行短诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>Moon River</title><artist>Audrey Hepburn</artist><excerpt>Two drifters</excerpt><translation>两个漂泊的人</translation><isParaphrase>false</isParaphrase></song><anchors><item>他受伤了</item></anchors><confidence>high</confidence></journal_page>', 'love_letter')`, sandbox);
 assert.equal(taggedPage.title, '雨夜');
 assert.equal(taggedPage.body, '我希望你平安回来。');
 assert.equal(taggedPage.song.title, 'Moon River');
+assert.equal(taggedPage.song.translation, '两个漂泊的人');
 
 const leakedPayload = '{"title":"你别受伤","dateLabel":"此刻","mood":"担心","body":"姜藏：\\n\\n我写的是"晚饭想吃铜锅涮肉"，也是真的怕你疼。","poem":{"text":"一行诗","author":"原创","work":"无题","isOriginal":true},"song":{"title":"一路生花","artist":"温奕心","excerpt":"我希望许过的愿望一路生花","isParaphrase":false},"memoryAnchors":[],"confidence":"low"}';
 sandbox.leakedPayload = leakedPayload;
@@ -81,6 +86,9 @@ const impressionPrompt = vm.runInContext(`buildPrompt('impression', { impression
 assert.match(impressionPrompt, /叙述视角始终是 User/);
 assert.match(impressionPrompt, /观察他的克制与温柔/);
 assert.match(impressionPrompt, /song\.title 必须填写准确歌名/);
+assert.match(impressionPrompt, /必须写成“初印象”/);
+assert.match(impressionPrompt, /User Persona/);
+assert.match(impressionPrompt, /song\.translation/);
 
 const dailyPrompt = vm.runInContext(`buildPrompt('daily_note')`, sandbox);
 assert.match(dailyPrompt, /User 与 Char 已经发生的日常相处/);
@@ -104,13 +112,17 @@ assert.match(batchPrompt, /必须按顺序完整输出/);
 assert.match(batchPrompt, /本轮不会发送第二次请求补字段/);
 assert.match(batchPrompt, /情感浓度必须明显高于其他栏目/);
 assert.match(batchPrompt, /正文至少三分之二描写 User 的内心情感/);
+assert.match(batchPrompt, /必须写“初印象”/);
+assert.match(batchPrompt, /User Persona/);
+assert.match(batchPrompt, /translation 必须给出/);
 assert.equal((batchPrompt.match(/<round_accompaniment>/g) || []).length, 1);
 assert.equal((batchPrompt.match(/<song>/g) || []).length, 1);
 
-const taggedBatch = vm.runInContext(`parseBatch('<journal_batch><relationship><status>uncertain</status><reason>证据不足</reason><evidence><item>尚未确认</item></evidence></relationship><round_accompaniment><poem><text>一行诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>夜曲</title><artist>周杰伦</artist><excerpt>一小段</excerpt><isParaphrase>false</isParaphrase></song></round_accompaniment><page type="impression"><title>印象</title><body>他很克制。</body></page><page type="daily_note"><title>日常</title><body>我们一起吃饭。</body></page><page type="love_letter"><title>给你</title><body>我想你平安。</body></page><page type="romance_diary" save="false"></page></journal_batch>')`, sandbox);
+const taggedBatch = vm.runInContext(`parseBatch('<journal_batch><relationship><status>uncertain</status><reason>证据不足</reason><evidence><item>尚未确认</item></evidence></relationship><round_accompaniment><poem><text>一行诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>夜曲</title><artist>周杰伦</artist><excerpt>一小段</excerpt><translation>一段中文译意</translation><isParaphrase>false</isParaphrase></song></round_accompaniment><page type="impression"><title>印象</title><body>他很克制。</body></page><page type="daily_note"><title>日常</title><body>我们一起吃饭。</body></page><page type="love_letter"><title>给你</title><body>我想你平安。</body></page><page type="romance_diary" save="false"></page></journal_batch>')`, sandbox);
 assert.equal(taggedBatch.updates.length, 3);
 assert.deepEqual(Array.from(taggedBatch.updates, item => item.type), ['impression', 'daily_note', 'love_letter']);
 assert.equal(taggedBatch.accompaniment.song.title, '夜曲');
+assert.equal(taggedBatch.accompaniment.song.translation, '一段中文译意');
 assert.equal(taggedBatch.accompaniment.poem.text, '一行诗');
 
 const batchResult = vm.runInContext(`parseBatch(JSON.stringify({
@@ -128,8 +140,9 @@ assert.equal(batchResult.relationship.status, 'uncertain');
 assert.equal(batchResult.accompaniment.song.title, '稻香');
 
 const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression' }] })`, sandbox);
-assert.equal(legacyBook.version, 3);
+assert.equal(legacyBook.version, 4);
 assert.equal(legacyBook.pages[0].type, 'impression');
+assert.equal(legacyBook.pages[0].impressionStage, 'initial');
 
 const separatedPages = vm.runInContext(`pagesForType({ pages: [
   { type: 'impression', title: '印象一' },
@@ -148,7 +161,15 @@ const foldedPageHtml = vm.runInContext(`renderPage({
 assert.match(foldedPageHtml, /^<details class="pj-page">/);
 assert.doesNotMatch(foldedPageHtml, /<details class="pj-page" open>/);
 assert.match(foldedPageHtml, /<summary>/);
-assert.match(foldedPageHtml, /本轮诗笺与配乐 · 全册仅此一份/);
+assert.doesNotMatch(foldedPageHtml, /confidence|记忆锚点|本轮诗句与配乐/);
+assert.doesNotMatch(foldedPageHtml, /Two drifters/);
+assert.doesNotMatch(foldedPageHtml, /一行诗/);
+
+const initialImpressionHtml = vm.runInContext(`renderPage({
+  id: 'impression-1', type: 'impression', impressionStage: 'initial', title: '第一次看见你',
+  dateLabel: '最初', mood: '好奇', body: '我先记住了你的沉默。'
+})`, sandbox);
+assert.match(initialImpressionHtml, /初印象/);
 
 const fallbackId = vm.runInContext('createId()', sandbox);
 assert.match(fallbackId, /^[a-z0-9]+-[a-z0-9]+$/);
@@ -202,4 +223,3 @@ assert.notEqual(firstSignature, secondSignature);
   console.error(error);
   process.exitCode = 1;
 });
-

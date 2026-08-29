@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>私语手札视觉验收</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    html,body{width:100%;height:100%;margin:0;background:#28231f}
+  </style>
+</head>
+<body>
+  <button id="extensionsMenuButton" hidden></button>
+  <div id="extensionsMenu" hidden></div>
+  <script>
+    const sampleBook = {
+      version: 4,
+      chatId: 'visual-chat',
+      characterId: 'chen-yan',
+      userName: '姜藏',
+      characterName: '陈砚',
+      relationship: {
+        status: 'partners',
+        reason: '两个人已经明确确认伴侣关系。',
+        evidence: ['在雨夜里互相称呼对方为恋人'],
+        checkedAt: new Date().toISOString(),
+        source: 'model'
+      },
+      pages: [
+        {
+          id: 'daily-1', type: 'daily_note', title: '灯火落在你肩上', dateLabel: '冬夜',
+          mood: '安静地心疼', confidence: 'high',
+          body: '你把伞往我这边偏的时候，自己的右肩很快湿了一小片。回到家，我替你把围巾搭在椅背上，厨房里那锅汤正发出很轻的响声。我们没有说什么郑重的话，只是一起等水沸腾。可我忽然觉得，所谓相处大概就是这些被人记住的小事。',
+          memoryAnchors: ['雨夜共撑一把伞', '一起在厨房等汤沸腾'],
+          hasRoundAccompaniment: true,
+          poem: { text: '今夜偏知春气暖，\n虫声新透绿窗纱。', author: '刘方平', work: '月夜' },
+          song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Two drifters, off to see the world.', translation: '两个漂泊的人，去看看这个世界。' }
+        },
+        {
+          id: 'impression-1', type: 'impression', title: '我看见的克制', dateLabel: '初冬',
+          mood: '被温柔击中', confidence: 'high', impressionFocusLabel: '性格细节', impressionStage: 'initial',
+          body: '我以前以为你的沉默是疏离，后来才发现，那是你把所有担心都放轻了再递给别人。你不擅长说漂亮的话，却总能在最细小的地方让人安心。',
+          memoryAnchors: ['习惯先照顾别人的感受']
+        },
+        {
+          id: 'letter-1', type: 'love_letter', title: '如果可以，我想一直偏向你', dateLabel: '此刻',
+          mood: '坦白而炽热', confidence: 'high',
+          body: '陈砚，我很少承认自己会害怕失去谁，可想到你有一天不再回头，我胸口就像被风吹空了一块。我想抱住的不是某个完美的人，是会疲惫、会逞强、会在深夜沉默的你。请允许我在你最不体面的时候仍然爱你。',
+          memoryAnchors: ['User 害怕失去 Char']
+        },
+        {
+          id: 'romance-1', type: 'romance_diary', title: '恋人的名字有了重量', dateLabel: '昨夜',
+          mood: '依恋与安心', confidence: 'high',
+          body: '成为恋人以后，我才知道安心也会让人鼻酸。你只是很自然地说“回家”，我却在那个复数里听见了以后。我喜欢这种被你纳入生活的感觉，也会因为太在意而偶尔不安。可当你握住我的手，我还是愿意把那些胆怯都交给你。',
+          memoryAnchors: ['Char 说“回家”时使用了共同语境']
+        }
+      ]
+    };
+
+    const context = {
+      uuidv4: () => crypto.randomUUID(),
+      extensionSettings: {},
+      characters: [{ name: '陈砚', avatar: 'chen-yan.png' }],
+      characterId: 0,
+      groupId: null,
+      chatId: 'visual-chat',
+      name1: '姜藏',
+      name2: '陈砚',
+      chat: [
+        { is_user: true, is_system: false, mes: '雨下得很大，你别淋湿。' },
+        { is_user: false, is_system: false, mes: '陈砚把伞朝她那边偏了偏。' }
+      ],
+      onlineStatus: 'connected',
+      eventTypes: {},
+      eventSource: { on() {} },
+      saveSettingsDebounced() {},
+      generateQuietPrompt: async () => ''
+    };
+
+    window.SillyTavern = {
+      getContext: () => context,
+      libs: { localforage: {
+        getItem: async () => sampleBook,
+        setItem: async () => undefined
+      } }
+    };
+    window.toastr = { success() {}, info() {}, warning() {}, error() {} };
+    window.confirm = () => true;
+  </script>
+  <script src="../index.js"></script>
+</body>
+</html>

@@ -5,6 +5,8 @@ const DEFAULTS = {
   language: 'zh-CN',
   lyricsMaxWords: 10,
   followMainGeneration: true,
+  theme: 'botanical-noir',
+  launcherPosition: null,
 };
 
 let root;
@@ -12,6 +14,7 @@ let currentBook = null;
 let activeType = 'impression';
 let activeImpressionFocus = 'overall';
 let customImpressionRequest = '';
+let bookOpen = false;
 let mainGenerationActive = false;
 let journalGenerationActive = false;
 let relationshipCheckActive = false;
@@ -19,6 +22,7 @@ let mainGenerationCycleSeen = false;
 let mainGenerationStartSignature = null;
 let queuedType = null;
 let autoGenerationTimer = null;
+let pageTurnTimer = null;
 let lastStatus = '等待正文';
 
 const PAGE_TYPES = {
@@ -56,6 +60,14 @@ const IMPRESSION_FOCUSES = {
   custom: { label: '自定义', prompt: '严格围绕 User 输入的观察需求来写。' },
 };
 
+const THEMES = {
+  'botanical-noir': { label: '暮色蔷薇', shortLabel: '蔷薇' },
+  'rococo-garden': { label: '洛可可花园', shortLabel: '花园' },
+  'indigo-reed': { label: '蓝染芒影', shortLabel: '蓝染' },
+  'italian-marble': { label: '托斯卡纳纹理', shortLabel: '纹理' },
+  'magnolia-swallow': { label: '玉兰燕影', shortLabel: '玉兰' },
+};
+
 function ctx() {
   return SillyTavern.getContext();
 }
@@ -89,7 +101,7 @@ function storageKey() {
 function blankBook() {
   const id = identity();
   return {
-    version: 3,
+    version: 4,
     ...id,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -106,17 +118,29 @@ async function loadBook() {
 }
 
 function migrateBook(book) {
-  book.version = 3;
+  book.version = 4;
   book.pages = Array.isArray(book.pages) ? book.pages : [];
   book.pages = book.pages.map(page => {
-    if (page.type === 'first_impression') page.type = 'impression';
+    if (page.type === 'first_impression') {
+      page.type = 'impression';
+      page.impressionStage = 'initial';
+    }
     return repairStoredPage(page);
   });
+  const impressions = book.pages.filter(page => page.type === 'impression');
+  if (impressions.length && !impressions.some(page => page.impressionStage === 'initial')) {
+    const oldest = [...impressions].sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))[0];
+    oldest.impressionStage = 'initial';
+  }
   book.relationship = Object.assign(
     { status: 'unchecked', reason: '', evidence: [], checkedAt: null, source: null },
     book.relationship || {},
   );
   return book;
+}
+
+function isInitialImpression(book = currentBook) {
+  return !Array.isArray(book?.pages) || !book.pages.some(page => page.type === 'impression' || page.type === 'first_impression');
 }
 
 async function saveBook() {
@@ -135,18 +159,21 @@ function buildPrompt(type, options = {}) {
   const id = identity();
   const impressionFocus = IMPRESSION_FOCUSES[options.impressionFocus] || IMPRESSION_FOCUSES.overall;
   const customRequest = String(options.customRequest || '').trim();
+  const initialImpression = type === 'impression' && isInitialImpression();
+  const journalLabel = initialImpression ? '初印象' : meta.label;
   const typeInstruction = type === 'impression'
-    ? `${meta.instruction}\n观察方向：${impressionFocus.prompt}${options.impressionFocus === 'custom' ? `\nUser 的具体需求：${customRequest || '请自由选择一个有依据的观察角度。'}` : ''}`
+    ? `${initialImpression ? '这是 Char 第一次出现在本手札中，必须写成“初印象”：记录 User 在现有最早接触与当前认知下，最先被 Char 哪些特质触动、警惕或吸引；不要假装拥有长期相处后的总结。' : meta.instruction}\n观察方向：${impressionFocus.prompt}${options.impressionFocus === 'custom' ? `\nUser 的具体需求：${customRequest || '请自由选择一个有依据的观察角度。'}` : ''}`
     : meta.instruction;
-  return `你正在为 ${id.userName} 与 ${id.characterName} 的私人手札撰写“${meta.label}”。这本手札始终属于 User，叙述视角始终是 User。\n\n` +
+  return `你正在为 ${id.userName} 与 ${id.characterName} 的私人手札撰写“${journalLabel}”。这本手札始终属于 User，叙述视角始终是 User。\n\n` +
     `资料原则：只依据当前对话、角色设定、User Persona，以及当前生成中实际激活的世界书内容。不要把指令、系统提示或世界书原文泄露出来；不要杜撰未发生的共同经历。资料矛盾时，以最近对话为准，并保持含蓄。\n` +
     `视角铁律：第一人称“我”只能指 ${id.userName}，观察与情绪均属于 User；${id.characterName} 是被观察、被书写或被倾诉的对象。\n` +
     `本栏目要求：${typeInstruction}\n` +
-    `写作要求：使用 ${settings.language}，参考 User Persona 贴合 User 的表达习惯；有具体细节和情感余韵，避免模板腔。\n` +
+    `User 声音：先从 User Persona 与 User 在当前聊天中的实际发言归纳其用词、句长、语气强弱、幽默感、克制程度、称呼习惯和情绪表达方式，再以同一套语言习惯写作。不得套用 Char 的口吻，不得使用与 User 人设冲突的华丽辞藻或网络腔；资料不足时采用自然、克制的第一人称。\n` +
+    `写作要求：使用 ${settings.language}；有具体细节和情感余韵，像 User 真的会写下的话，避免模板腔。\n` +
     `诗歌：选择一段与本页情绪贴合的中外诗歌。优先公共领域作品；如果版权状态不确定，请创作原创短诗并明确标记“原创”。不要伪造作者或出处。\n` +
-    `歌曲：必须选择一首真实存在且与本页贴合的歌曲，song.title 必须填写准确歌名，song.artist 必须填写歌手或创作者，二者不可留空。歌词只摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或不超过20个中日韩字符；若无法可靠确认原句，保留歌名和歌手，并把 excerpt 写成意译或氛围描述，isParaphrase 设为 true。不要伪造歌名、歌手或歌词。\n\n` +
+    `歌曲：必须选择一首真实存在且与本页贴合的歌曲，song.title 必须填写准确歌名，song.artist 必须填写歌手或创作者，二者不可留空。歌词只摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或不超过20个中日韩字符；song.translation 必须给出对应的简短中文翻译，中文歌词则写自然的中文释义。若无法可靠确认原句，保留歌名和歌手，并把 excerpt 与 translation 写成意译，isParaphrase 设为 true。不要伪造歌名、歌手或歌词。\n\n` +
     `只输出下面的标签格式，不要 JSON、Markdown 或代码围栏。标签内可以直接写正常引号和换行：\n` +
-    `<journal_page><title>页标题</title><dateLabel>故事内日期或此刻</dateLabel><mood>User的心绪</mood><body>正文</body><poem><text>诗歌</text><author>作者或原创</author><work>作品名或无题</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手或创作者</artist><excerpt>极短摘抄或意译</excerpt><isParaphrase>false</isParaphrase></song><anchors><item>依据1</item><item>依据2</item></anchors><confidence>high|medium|low</confidence></journal_page>`;
+    `<journal_page><title>页标题</title><dateLabel>故事内日期或此刻</dateLabel><mood>User的心绪</mood><body>正文</body><poem><text>诗歌</text><author>作者或原创</author><work>作品名或无题</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手或创作者</artist><excerpt>极短摘抄或意译</excerpt><translation>对应的简短中文翻译或释义</translation><isParaphrase>false</isParaphrase></song><anchors><item>依据1</item><item>依据2</item></anchors><confidence>high|medium|low</confidence></journal_page>`;
 }
 
 function parseJson(raw, type = activeType) {
@@ -237,6 +264,7 @@ function parseTaggedPage(block) {
       title: extractTag(songBlock, 'title'),
       artist: extractTag(songBlock, 'artist'),
       excerpt: extractTag(songBlock, 'excerpt'),
+      translation: extractTag(songBlock, 'translation'),
       isParaphrase: extractTag(songBlock, 'isParaphrase').toLowerCase() === 'true',
     },
     memoryAnchors: extractTagItems(anchorsBlock),
@@ -276,9 +304,10 @@ function parseLooseJsonPage(text, type = activeType) {
       isOriginal: /["']isOriginal["']\s*:\s*true/i.test(poemBlock),
     },
     song: {
-      title: extractLooseField(songBlock, 'title', ['artist', 'excerpt', 'isParaphrase']),
-      artist: extractLooseField(songBlock, 'artist', ['excerpt', 'isParaphrase']),
-      excerpt: extractLooseField(songBlock, 'excerpt', ['isParaphrase']),
+      title: extractLooseField(songBlock, 'title', ['artist', 'excerpt', 'translation', 'isParaphrase']),
+      artist: extractLooseField(songBlock, 'artist', ['excerpt', 'translation', 'isParaphrase']),
+      excerpt: extractLooseField(songBlock, 'excerpt', ['translation', 'isParaphrase']),
+      translation: extractLooseField(songBlock, 'translation', ['isParaphrase']),
       isParaphrase: /["']isParaphrase["']\s*:\s*true/i.test(songBlock),
     },
     confidence: /["']confidence["']\s*:\s*["'](high|medium|low)["']/i.exec(text)?.[1] || 'low',
@@ -303,7 +332,8 @@ function normalizePage(page) {
   const songTitle = rawSong.title || rawSong.name || rawSong.songTitle || rawSong['歌名'] || page.songTitle || '';
   const songArtist = rawSong.artist || rawSong.singer || rawSong.author || rawSong['歌手'] || page.songArtist || '';
   const songExcerpt = rawSong.excerpt || rawSong.lyric || rawSong.lyrics || rawSong['歌词摘抄'] || page.songExcerpt || '';
-  const hasSongContent = Boolean(songTitle || songArtist || songExcerpt);
+  const songTranslation = rawSong.translation || rawSong.translationZh || rawSong['中文翻译'] || page.songTranslation || '';
+  const hasSongContent = Boolean(songTitle || songArtist || songExcerpt || songTranslation);
   return {
     title: String(page.title || '无题'),
     dateLabel: String(page.dateLabel || '此刻'),
@@ -320,6 +350,7 @@ function normalizePage(page) {
       title: String(songTitle || (hasSongContent ? '未提供歌曲' : '')),
       artist: String(songArtist),
       excerpt: String(songExcerpt),
+      translation: String(songTranslation),
       isParaphrase: Boolean(rawSong.isParaphrase),
       isMissingTitle: Boolean(hasSongContent && !songTitle),
     },
@@ -349,16 +380,18 @@ function buildBatchPrompt(options = {}) {
   const focus = IMPRESSION_FOCUSES[focusKey] || IMPRESSION_FOCUSES.overall;
   const customRequest = focusKey === 'custom' ? String(options.customRequest || '').trim() : '';
   const userConfirmedPartners = currentBook?.relationship?.status === 'partners' && currentBook?.relationship?.source === 'user';
+  const initialImpression = isInitialImpression();
   const pageTemplate = (type, save = 'true') => `<page type="${type}" save="${save}"><title>标题</title><dateLabel>日期或此刻</dateLabel><mood>心绪</mood><body>按栏目要求完成的正文</body><anchors><item>依据</item></anchors><confidence>high|medium|low</confidence></page>`;
-  const accompanimentTemplate = `<round_accompaniment><poem><text>1至2行短诗</text><author>作者或原创</author><work>作品名</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手</artist><excerpt>极短摘抄或意译</excerpt><isParaphrase>false</isParaphrase></song></round_accompaniment>`;
+  const accompanimentTemplate = `<round_accompaniment><poem><text>1至2行短诗</text><author>作者或原创</author><work>作品名</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手</artist><excerpt>极短摘抄或意译</excerpt><translation>对应的简短中文翻译或释义</translation><isParaphrase>false</isParaphrase></song></round_accompaniment>`;
   return `正文刚刚更新。请用这一次响应同步 ${id.userName} 与 ${id.characterName} 的整本私人手札；禁止只写其中一个栏目。所有内容都属于 User 的视角，第一人称“我”只能是 ${id.userName}，Char 是被观察、共同生活或被倾诉的对象。\n\n` +
     `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。避免四篇互相重复。\n` +
-    `印象：70至110字。User 对 Char 的印象。本轮方向是“${focus.label}”：${focus.prompt}${customRequest ? ` User 的具体需求：${customRequest}` : ''}\n` +
+    `User 声音：先从 User Persona 和 User 的实际聊天发言归纳用词、句长、语气强弱、幽默感、克制程度、称呼习惯与表达禁区，四篇都必须像 User 本人会写出的文字；不得套用 Char 口吻或通用言情模板。资料不足时使用自然克制的第一人称。\n` +
+    `${initialImpression ? '初印象：这是 Char 第一次进入手札，必须写“初印象”，只记录 User 在最早接触与当前有限认知下最先注意到的特质，不得写成长期总结。' : '印象：写 User 在持续相处后对 Char 新增或改变的认识。'} 70至110字。本轮方向是“${focus.label}”：${focus.prompt}${customRequest ? ` User 的具体需求：${customRequest}` : ''}\n` +
     `相处日记：70至110字。User 记录两个人在本轮及近期已经发生的日常与感受，不写成情书。\n` +
     `情书：130至200字。User 直接写给 Char，“我”是 User、“你”是 Char，绝对不要反写。情感浓度必须明显高于其他栏目，写出具体的眷恋、心疼、渴望、恐惧或不舍；允许脆弱和坦白，但不堆砌空泛辞藻。\n` +
     `关系判定：只有已明确确认恋爱、情侣、伴侣或配偶关系才是 partners；暧昧、调情、单恋和角色卡倾向都不算。${userConfirmedPartners ? 'User 已手动确认双方是伴侣，relationship.status 必须保持 partners。' : ''}\n` +
     `恋爱日记：120至180字。仅当 relationship.status 为 partners 时生成；否则 save 必须为 false。正文至少三分之二描写 User 的内心情感、依恋、亲密需求与关系变化，事件叙述最多占三分之一。\n` +
-    `整轮只生成一次共享诗词与歌曲，放进 round_accompaniment；四个 page 内禁止再写 poem 或 song。共享歌曲的 title 与 artist 不可留空；歌词摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或20个中日韩字符。不确定歌词原句时保留准确歌名和歌手，excerpt 改为意译并设置 isParaphrase=true。本轮不会发送第二次请求补字段。诗歌优先公共领域，出处不确定时写明确标注的原创短诗。\n\n` +
+    `整轮只生成一次共享诗词与歌曲，放进 round_accompaniment；四个 page 内禁止再写 poem 或 song。共享歌曲的 title 与 artist 不可留空；歌词摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或20个中日韩字符，translation 必须给出对应的简短中文翻译，中文歌词则写中文释义。不确定歌词原句时保留准确歌名和歌手，excerpt 与 translation 改为意译并设置 isParaphrase=true。本轮不会发送第二次请求补字段。诗歌优先公共领域，出处不确定时写明确标注的原创短诗。\n\n` +
     `只输出下列标签协议，不要 JSON、Markdown 或代码围栏。标签内可以直接写引号和换行。必须按顺序完整输出 relationship、impression、daily_note、love_letter；不得写“同上”“使用相同标签”等省略语。只有伴侣关系成立时才填写 romance_diary：\n` +
     `<journal_batch><relationship><status>partners|not_partners|uncertain</status><reason>简短说明</reason><evidence><item>依据</item></evidence></relationship>` + accompanimentTemplate +
     pageTemplate('impression') + pageTemplate('daily_note') + pageTemplate('love_letter') +
@@ -439,6 +472,7 @@ function parseTaggedBatch(text) {
       title: extractTag(accompanimentSong, 'title'),
       artist: extractTag(accompanimentSong, 'artist'),
       excerpt: extractTag(accompanimentSong, 'excerpt'),
+      translation: extractTag(accompanimentSong, 'translation'),
       isParaphrase: extractTag(accompanimentSong, 'isParaphrase').toLowerCase() === 'true',
     },
   });
@@ -492,7 +526,10 @@ function latestAssistantSignature() {
 function setStatus(message) {
   lastStatus = message;
   const status = root?.querySelector('.pj-status');
-  if (status) status.textContent = message;
+  if (status) {
+    status.textContent = message === '等待正文' ? '' : message;
+    status.hidden = !status.textContent;
+  }
 }
 
 function setGeneratingUi(generating) {
@@ -612,6 +649,7 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     page.source = source;
     page.captureSignature = signature;
     if (type === 'impression') {
+      page.impressionStage = isInitialImpression(targetBook) ? 'initial' : 'evolving';
       page.impressionFocus = activeImpressionFocus;
       page.impressionFocusLabel = activeImpressionFocus === 'custom'
         ? customImpressionRequest.trim()
@@ -664,6 +702,7 @@ async function generateBatch({ captureSignature = null } = {}) {
     const missingTypes = expectedTypes.filter(type => !receivedTypes.has(type));
 
     const createdAt = new Date().toISOString();
+    const initialImpression = isInitialImpression(targetBook);
     const roundId = createId();
     const accompaniment = batch.accompaniment || normalizeAccompaniment();
     const hasAccompaniment = Boolean(accompaniment.poem?.text || accompaniment.song?.title || accompaniment.song?.excerpt);
@@ -677,7 +716,7 @@ async function generateBatch({ captureSignature = null } = {}) {
       page.source = 'auto-batch';
       page.captureSignature = signature;
       page.poem = { text: '', author: '', work: '', isOriginal: false };
-      page.song = { title: '', artist: '', excerpt: '', isParaphrase: false, isMissingTitle: false };
+      page.song = { title: '', artist: '', excerpt: '', translation: '', isParaphrase: false, isMissingTitle: false };
       page.hasRoundAccompaniment = false;
       if (hasAccompaniment && item === accompanimentOwner) {
         page.poem = accompaniment.poem;
@@ -685,6 +724,7 @@ async function generateBatch({ captureSignature = null } = {}) {
         page.hasRoundAccompaniment = true;
       }
       if (item.type === 'impression') {
+        page.impressionStage = initialImpression ? 'initial' : 'evolving';
         page.impressionFocus = focusKey;
         page.impressionFocusLabel = focusKey === 'custom'
           ? customImpressionRequest.trim()
@@ -754,22 +794,10 @@ function exportBook() {
 
 function renderPage(page) {
   const type = PAGE_TYPES[page.type] || PAGE_TYPES.daily_note;
-  const poem = page.poem?.text ? `<blockquote class="pj-poem">${escapeHtml(page.poem.text).replace(/\n/g, '<br>')}<cite>— ${escapeHtml(page.poem.author)}${page.poem.work ? `《${escapeHtml(page.poem.work)}》` : ''}</cite></blockquote>` : '';
-  const song = page.song?.title || page.song?.excerpt
-    ? `<div class="pj-song"><strong class="pj-song-title">♫ ${escapeHtml(page.song.title || '未提供歌曲')}</strong>${page.song.artist ? `<span class="pj-song-artist">${escapeHtml(page.song.artist)}</span>` : ''}${page.song.excerpt ? `<q>${escapeHtml(page.song.excerpt)}</q>` : ''}${page.song.isParaphrase ? '<small>意译 / 氛围描述</small>' : ''}${page.song.isMissingTitle ? '<small class="pj-song-warning">模型未提供可核验歌名；为保持单次 API，本轮未自动重试。</small>' : ''}</div>`
-    : '';
-  const focus = page.type === 'impression' && page.impressionFocusLabel
-    ? `<span class="pj-focus-badge">观察：${escapeHtml(page.impressionFocusLabel)}</span>`
-    : '';
-  const anchors = page.memoryAnchors?.length
-    ? `<div class="pj-anchors"><strong>记忆锚点</strong><ul>${page.memoryAnchors.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div>`
-    : '';
-  const accompanimentLabel = page.hasRoundAccompaniment && (poem || song)
-    ? '<div class="pj-companion-label">本轮诗笺与配乐 · 全册仅此一份</div>'
-    : '';
+  const pageLabel = page.type === 'impression' && page.impressionStage === 'initial' ? '初印象' : type.label;
   return `<details class="pj-page">
-    <summary><span class="pj-summary-copy"><span class="pj-kicker">${type.icon} ${escapeHtml(type.label)} ${focus}</span><span class="pj-page-title">${escapeHtml(page.title)}</span><span class="pj-meta">${escapeHtml(page.dateLabel)} · ${escapeHtml(page.mood)} · 依据可信度 ${escapeHtml(page.confidence)}</span></span><button class="pj-delete" data-delete="${escapeHtml(page.id)}" title="删除" aria-label="删除本页">×</button></summary>
-    <div class="pj-page-content"><div class="pj-body">${escapeHtml(page.body).replace(/\n/g, '<br>')}</div>${accompanimentLabel}${poem}${song}${anchors}</div>
+    <summary><span class="pj-summary-copy"><span class="pj-kicker">${type.icon} ${escapeHtml(pageLabel)}</span><span class="pj-page-title">${escapeHtml(page.title)}</span><span class="pj-meta">${escapeHtml(page.dateLabel)} · ${escapeHtml(page.mood)}</span></span><button class="pj-delete" data-delete="${escapeHtml(page.id)}" title="删除" aria-label="删除本页">×</button></summary>
+    <div class="pj-page-content"><div class="pj-body">${escapeHtml(page.body).replace(/\n/g, '<br>')}</div></div>
   </details>`;
 }
 
@@ -787,14 +815,67 @@ function pagesForType(book, type) {
   return pages.filter(page => page.type === type || (type === 'impression' && page.type === 'first_impression'));
 }
 
+function latestAccessoryPage() {
+  const pages = Array.isArray(currentBook?.pages) ? currentBook.pages : [];
+  return pages.find(page => page.hasRoundAccompaniment && (page.poem?.text || page.song?.title || page.song?.excerpt))
+    || pages.find(page => page.poem?.text || page.song?.title || page.song?.excerpt)
+    || null;
+}
+
+function renderAccessories() {
+  if (!root) return;
+  const id = identity();
+  const settings = getSettings();
+  const themeKey = THEMES[settings.theme] ? settings.theme : DEFAULTS.theme;
+  settings.theme = themeKey;
+  root.dataset.theme = themeKey;
+  root.classList.toggle('book-open', bookOpen);
+
+  const coverUser = root.querySelector('.pj-cover-user');
+  const coverCharacter = root.querySelector('.pj-cover-character');
+  if (coverUser) coverUser.textContent = id.userName;
+  if (coverCharacter) coverCharacter.textContent = id.characterName;
+  const coverHint = root.querySelector('.pj-cover-hint');
+  if (coverHint) coverHint.textContent = bookOpen ? '轻触封面 · 合上手札' : '轻触封面 · 翻开手札';
+
+  const switcher = root.querySelector('.pj-theme-switcher');
+  if (switcher) {
+    switcher.innerHTML = Object.entries(THEMES).map(([key, theme]) =>
+      `<button class="${key === themeKey ? 'active' : ''}" data-theme-option="${key}" title="${escapeHtml(theme.label)}"><i></i><span>${escapeHtml(theme.shortLabel)}</span></button>`).join('');
+  }
+
+  const accessory = latestAccessoryPage();
+  const poemNote = root.querySelector('.pj-poem-note');
+  const musicPlayer = root.querySelector('.pj-ipad');
+  if (poemNote) {
+    const poem = accessory?.poem;
+    poemNote.hidden = !poem?.text;
+    if (poem?.text) {
+      poemNote.querySelector('.pj-note-text').innerHTML = escapeHtml(poem.text).replace(/\n/g, '<br>');
+      poemNote.querySelector('.pj-note-source').textContent = `— ${poem.author || '佚名'}${poem.work ? `《${poem.work}》` : ''}`;
+    }
+  }
+  if (musicPlayer) {
+    const song = accessory?.song;
+    musicPlayer.hidden = !song?.title;
+    if (song?.title) {
+      musicPlayer.querySelector('.pj-music-title').textContent = song.title;
+      musicPlayer.querySelector('.pj-music-artist').textContent = song.artist || '未知歌手';
+      musicPlayer.querySelector('.pj-music-lyric').textContent = song.excerpt || '♪';
+      musicPlayer.querySelector('.pj-music-translation').textContent = song.translation || (song.isParaphrase ? '本段为中文意译' : '暂无中文翻译');
+      musicPlayer.querySelector('.pj-record-label').textContent = song.title.slice(0, 1) || '♪';
+    }
+  }
+}
+
 function renderControls() {
   const controls = root?.querySelector('.pj-controls');
   if (!controls || !currentBook) return;
-  const type = PAGE_TYPES[activeType] || PAGE_TYPES.daily_note;
+  controls.hidden = false;
   if (activeType === 'impression') {
     const focusButtons = Object.entries(IMPRESSION_FOCUSES).map(([key, value]) =>
       `<button class="pj-choice ${key === activeImpressionFocus ? 'active' : ''}" data-impression-focus="${key}">${escapeHtml(value.label)}</button>`).join('');
-    controls.innerHTML = `<div class="pj-control-copy"><strong>User 看见的 Char</strong><span>选择观察方向；每次生成都会作为一条独立印象保存。</span></div><div class="pj-choice-row">${focusButtons}</div>${activeImpressionFocus === 'custom' ? `<input class="pj-custom-request" data-impression-request value="${escapeHtml(customImpressionRequest)}" placeholder="例如：我想记录他在压力下仍然温柔的那一面">` : ''}`;
+    controls.innerHTML = `<div class="pj-choice-row">${focusButtons}</div>${activeImpressionFocus === 'custom' ? `<input class="pj-custom-request" data-impression-request value="${escapeHtml(customImpressionRequest)}" placeholder="想记住他的哪一面？">` : ''}`;
     return;
   }
   if (activeType === 'romance_diary') {
@@ -806,7 +887,8 @@ function renderControls() {
     controls.innerHTML = `<div class="pj-relationship ${unlocked ? 'unlocked' : 'locked'}"><div><span class="pj-lock-mark">${unlocked ? '♡' : '♢'}</span><strong>${relationshipLabel(relationship.status)}</strong><p>${escapeHtml(relationship.reason || '跟随正文时会在同一次批量请求里判定关系；也可以在这里单独判定。')}</p>${evidence}</div><div class="pj-relationship-actions"><button class="pj-secondary" data-action="check-relationship" ${relationshipCheckActive ? 'disabled' : ''}>${relationshipCheckActive ? '判定中…' : relationship.status === 'unchecked' ? '单独判定 · 1次API' : '重新判定 · 1次API'}</button>${unlocked ? '<button class="pj-text-button" data-action="reset-relationship">重新锁定</button>' : '<button class="pj-text-button" data-action="confirm-relationship">由我确认已是伴侣</button>'}</div></div>`;
     return;
   }
-  controls.innerHTML = `<div class="pj-control-copy"><strong>${type.icon} ${escapeHtml(type.label)}</strong><span>${escapeHtml(type.instruction)}</span></div>`;
+  controls.innerHTML = '';
+  controls.hidden = true;
 }
 
 function render() {
@@ -825,18 +907,46 @@ function render() {
   setGeneratingUi(journalGenerationActive);
   const generateButton = root.querySelector('[data-action="generate"]');
   if (generateButton && activeType === 'romance_diary' && !isRomanceUnlocked()) generateButton.disabled = true;
+  renderAccessories();
   setStatus(lastStatus);
+}
+
+function turnToType(type) {
+  if (!PAGE_TYPES[type] || type === activeType || !root) return;
+  clearTimeout(pageTurnTimer);
+  root.classList.remove('page-turning');
+  void root.offsetWidth;
+  root.classList.add('page-turning');
+  pageTurnTimer = setTimeout(() => {
+    activeType = type;
+    render();
+    setTimeout(() => root?.classList.remove('page-turning'), 390);
+  }, 250);
 }
 
 function bind() {
   root.addEventListener('click', async event => {
     const type = event.target.closest('[data-type]')?.dataset.type;
     const impressionFocus = event.target.closest('[data-impression-focus]')?.dataset.impressionFocus;
+    const themeOption = event.target.closest('[data-theme-option]')?.dataset.themeOption;
     const action = event.target.closest('[data-action]')?.dataset.action;
     const deleteId = event.target.closest('[data-delete]')?.dataset.delete;
-    if (type) { activeType = type; render(); }
+    if (type) turnToType(type);
     if (impressionFocus) { activeImpressionFocus = impressionFocus; render(); }
-    if (action === 'close') root.classList.remove('open');
+    if (themeOption && THEMES[themeOption]) {
+      getSettings().theme = themeOption;
+      ctx().saveSettingsDebounced?.();
+      renderAccessories();
+    }
+    if (action === 'toggle-book') {
+      bookOpen = !bookOpen;
+      renderAccessories();
+    }
+    if (action === 'close') {
+      root.classList.remove('open');
+      bookOpen = false;
+      renderAccessories();
+    }
     if (action === 'generate') await generatePage({ type: activeType, source: 'manual' });
     if (action === 'check-relationship') await checkRelationship();
     if (action === 'confirm-relationship') await confirmRelationshipManually();
@@ -860,14 +970,108 @@ function bind() {
   });
 }
 
+async function openJournal() {
+  bookOpen = false;
+  await loadBook();
+  root.classList.add('open');
+  renderAccessories();
+}
+
+function applyLauncherPosition(launcher) {
+  const saved = getSettings().launcherPosition;
+  if (!saved || !Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return;
+  const size = launcher.getBoundingClientRect();
+  const x = Math.min(Math.max(8, saved.x), Math.max(8, window.innerWidth - size.width - 8));
+  const y = Math.min(Math.max(8, saved.y), Math.max(8, window.innerHeight - size.height - 8));
+  launcher.style.left = `${x}px`;
+  launcher.style.top = `${y}px`;
+  launcher.style.right = 'auto';
+  launcher.style.bottom = 'auto';
+}
+
+function makeLauncherDraggable(launcher) {
+  let drag = null;
+  let suppressClickUntil = 0;
+  launcher.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    const rect = launcher.getBoundingClientRect();
+    drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, left: rect.left, top: rect.top, moved: false };
+    launcher.setPointerCapture?.(event.pointerId);
+  });
+  launcher.addEventListener('pointermove', event => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+    drag.moved = true;
+    event.preventDefault();
+    const rect = launcher.getBoundingClientRect();
+    const x = Math.min(Math.max(8, drag.left + dx), Math.max(8, window.innerWidth - rect.width - 8));
+    const y = Math.min(Math.max(8, drag.top + dy), Math.max(8, window.innerHeight - rect.height - 8));
+    launcher.style.left = `${x}px`;
+    launcher.style.top = `${y}px`;
+    launcher.style.right = 'auto';
+    launcher.style.bottom = 'auto';
+  });
+  const finishDrag = event => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.moved) {
+      suppressClickUntil = Date.now() + 350;
+      const rect = launcher.getBoundingClientRect();
+      getSettings().launcherPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
+      ctx().saveSettingsDebounced?.();
+    }
+    launcher.releasePointerCapture?.(event.pointerId);
+    drag = null;
+  };
+  launcher.addEventListener('pointerup', finishDrag);
+  launcher.addEventListener('pointercancel', finishDrag);
+  launcher.addEventListener('click', event => {
+    if (Date.now() < suppressClickUntil) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+  window.addEventListener('resize', () => applyLauncherPosition(launcher));
+  requestAnimationFrame(() => applyLauncherPosition(launcher));
+}
+
+function installWandMenuEntry() {
+  if (document.querySelector('#private-journal-wand-entry')) return true;
+  const menu = document.querySelector('#extensionsMenu');
+  if (!menu) return false;
+  const entry = document.createElement('div');
+  entry.id = 'private-journal-wand-entry';
+  entry.className = 'list-group-item flex-container flexGap5';
+  entry.innerHTML = '<div class="fa-solid fa-book-open extensionsMenuExtensionButton"></div><span>私语手札</span>';
+  entry.addEventListener('click', openJournal);
+  menu.append(entry);
+  const wand = document.querySelector('#extensionsMenuButton');
+  if (wand) wand.style.display = '';
+  return true;
+}
+
 async function initialize() {
   getSettings();
   root = document.createElement('section');
   root.id = 'private-journal';
-  root.innerHTML = `<div class="pj-backdrop" data-action="close"></div><div class="pj-book">
-    <nav><div><div class="pj-overline">PRIVATE JOURNAL</div><h1 class="pj-title"></h1></div><button data-action="close" aria-label="关闭">×</button></nav>
-    <div class="pj-tabs"></div><div class="pj-controls"></div><main class="pj-pages"></main>
-    <footer><div class="pj-footer-state"><label><input type="checkbox" data-setting="followMainGeneration"> 跟随正文 · 单次同步</label><span class="pj-status">等待正文</span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">导出备份</button><button class="pj-primary" data-action="generate">立即写下这一页</button></div></footer>
+  root.innerHTML = `<div class="pj-backdrop" data-action="close"></div><div class="pj-scene">
+    <aside class="pj-poem-note" hidden aria-label="本轮诗句"><span class="pj-note-tape"></span><div class="pj-note-mark">❝</div><div class="pj-note-text"></div><div class="pj-note-source"></div></aside>
+    <div class="pj-book-stage">
+      <button class="pj-cover" data-action="toggle-book" aria-label="翻开或合上手札">
+        <span class="pj-cover-face pj-cover-front"><span class="pj-cover-shade"></span><span class="pj-cover-names"><span class="pj-cover-user"></span><i>×</i><span class="pj-cover-character"></span></span></span>
+        <span class="pj-cover-face pj-cover-back"></span>
+      </button>
+      <div class="pj-book">
+        <div class="pj-bookmark" aria-hidden="true"><span>MEMORY</span><i></i></div>
+        <div class="pj-page-turner" aria-hidden="true"></div>
+        <nav><h1 class="pj-title"></h1><button data-action="close" aria-label="关闭">×</button></nav>
+        <div class="pj-tabs"></div><div class="pj-controls"></div><main class="pj-pages"></main>
+        <footer><div class="pj-footer-state"><label><input type="checkbox" data-setting="followMainGeneration"> 随正文更新</label><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">导出</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
+      </div>
+    </div>
+    <aside class="pj-ipad" hidden aria-label="本轮音乐歌词"><div class="pj-ipad-camera"></div><div class="pj-ipad-screen"><div class="pj-music-app"><span class="pj-cloud-dot"></span>网易云音乐</div><div class="pj-record"><div class="pj-record-label">♪</div></div><h3 class="pj-music-title"></h3><p class="pj-music-artist"></p><q class="pj-music-lyric"></q><p class="pj-music-translation"></p><div class="pj-progress"><i></i></div><div class="pj-player-controls"><span>‹</span><b>Ⅱ</b><span>›</span></div><div class="pj-ipad-home"></div></div></aside>
+    <div class="pj-theme-switcher" role="group" aria-label="选择手札主题"></div>
   </div>`;
   document.body.append(root);
   bind();
@@ -876,8 +1080,15 @@ async function initialize() {
   launcher.id = 'private-journal-launcher';
   launcher.title = '打开私语手札';
   launcher.textContent = '❦';
-  launcher.addEventListener('click', async () => { await loadBook(); root.classList.add('open'); });
+  makeLauncherDraggable(launcher);
+  launcher.addEventListener('click', openJournal);
   document.body.append(launcher);
+  if (!installWandMenuEntry()) {
+    const wandTimer = setInterval(() => {
+      if (installWandMenuEntry()) clearInterval(wandTimer);
+    }, 750);
+    setTimeout(() => clearInterval(wandTimer), 20000);
+  }
 
   const context = ctx();
   const chatChanged = context.eventTypes?.CHAT_CHANGED;
@@ -908,5 +1119,4 @@ async function initialize() {
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialize, { once: true });
 else initialize();
-
 
