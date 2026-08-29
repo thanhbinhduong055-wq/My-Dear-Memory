@@ -48,6 +48,10 @@ for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-
   assert.equal(fs.existsSync(require.resolve(`../assets/themes/cutouts/${theme}.png`)), true);
 }
 assert.match(styleSource, /--pj-spread-ratio/);
+assert.match(source, /class="pj-scene-close"/);
+assert.match(source, /aria-label="书签目录"/);
+assert.match(source, /按故事日自动整理/);
+assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
 
 const strictPage = vm.runInContext(`parseJson('{"title":"雨后","body":"我们回到了屋檐下。"}', 'daily_note')`, sandbox);
 assert.equal(strictPage.title, '雨后');
@@ -146,7 +150,7 @@ assert.equal(batchResult.relationship.status, 'uncertain');
 assert.equal(batchResult.accompaniment.song.title, '稻香');
 
 const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression' }] })`, sandbox);
-assert.equal(legacyBook.version, 4);
+assert.equal(legacyBook.version, 5);
 assert.equal(legacyBook.pages[0].type, 'impression');
 assert.equal(legacyBook.pages[0].impressionStage, 'initial');
 
@@ -191,6 +195,36 @@ const firstSignature = vm.runInContext('latestAssistantSignature()', sandbox);
 contextValue.chat[1].mes = '重新生成后的回复';
 const secondSignature = vm.runInContext('latestAssistantSignature()', sandbox);
 assert.notEqual(firstSignature, secondSignature);
+
+const relativeDayMarker = vm.runInContext(`detectStoryDayMarker('次日清晨，窗外的雨已经停了。')`, sandbox);
+assert.equal(relativeDayMarker.type, 'relative');
+assert.equal(relativeDayMarker.label, '次日');
+assert.equal(vm.runInContext(`detectStoryDayMarker('【翌日】\\n晨光落进房间。').type`, sandbox), 'relative');
+const absoluteDayMarker = vm.runInContext(`detectStoryDayMarker('【2025年1月19日 · 清晨】\\n她推开了窗。')`, sandbox);
+assert.equal(absoluteDayMarker.type, 'absolute');
+assert.equal(absoluteDayMarker.key, 'date:2025-01-19');
+assert.equal(vm.runInContext(`detectStoryDayMarker('我想起第二天要去买花。')`, sandbox), null);
+
+const timelineBook = vm.runInContext(`({ timeline: {} })`, sandbox);
+sandbox.timelineBook = timelineBook;
+const baselineDecision = vm.runInContext(`observeStoryDay(timelineBook, { signature: 's1', content: '夜色很安静。' })`, sandbox);
+assert.equal(baselineDecision.shouldUpdate, false);
+assert.equal(baselineDecision.reason, 'baseline');
+const sameDayDecision = vm.runInContext(`observeStoryDay(timelineBook, { signature: 's2', content: '他们继续聊了一会儿。' })`, sandbox);
+assert.equal(sameDayDecision.shouldUpdate, false);
+assert.equal(sameDayDecision.reason, 'same-day');
+const nextDayDecision = vm.runInContext(`observeStoryDay(timelineBook, { signature: 's3', content: '第二天早上，他先醒了。' })`, sandbox);
+assert.equal(nextDayDecision.shouldUpdate, true);
+assert.equal(nextDayDecision.reason, 'relative-boundary');
+const duplicateDecision = vm.runInContext(`observeStoryDay(timelineBook, { signature: 's3', content: '第二天早上，他先醒了。' })`, sandbox);
+assert.equal(duplicateDecision.shouldUpdate, false);
+assert.equal(duplicateDecision.reason, 'duplicate');
+
+const datedTimelineBook = vm.runInContext(`({ timeline: {} })`, sandbox);
+sandbox.datedTimelineBook = datedTimelineBook;
+assert.equal(vm.runInContext(`observeStoryDay(datedTimelineBook, { signature: 'd1', content: '2025年1月18日，雪落下来。' }).shouldUpdate`, sandbox), false);
+assert.equal(vm.runInContext(`observeStoryDay(datedTimelineBook, { signature: 'd2', content: '2025年1月18日晚，他们回到家。' }).shouldUpdate`, sandbox), false);
+assert.equal(vm.runInContext(`observeStoryDay(datedTimelineBook, { signature: 'd3', content: '2025年1月19日清晨，炉火熄了。' }).shouldUpdate`, sandbox), true);
 
 (async () => {
   let receivedOptions;
