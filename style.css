@@ -9,11 +9,12 @@
 #private-journal {
   --pj-accent:#713c46;
   --pj-accent-soft:#b98b88;
-  --pj-cover-image:url('./assets/themes/botanical-noir.jpg');
-  --pj-cover-position:22%;
-  --pj-name-x:50%;
-  --pj-name-y:74%;
-  --pj-name-width:62%;
+  --pj-cover-image:url('./assets/themes/cutouts/botanical-noir.png');
+  --pj-cover-ratio:.746;
+  --pj-spread-ratio:1.492;
+  --pj-name-x:55.5%;
+  --pj-name-y:76%;
+  --pj-name-width:38%;
   --pj-name-color:#34271f;
   position:fixed;
   inset:0;
@@ -27,57 +28,62 @@
 #private-journal [hidden] { display:none!important; }
 
 #private-journal[data-theme="botanical-noir"] {
-  --pj-cover-image:url('./assets/themes/botanical-noir.jpg');
+  --pj-cover-image:url('./assets/themes/cutouts/botanical-noir.png');
+  --pj-cover-ratio:.746;
+  --pj-spread-ratio:1.492;
   --pj-accent:#672f3d;
   --pj-accent-soft:#a56f74;
-  --pj-cover-position:22%;
-  --pj-name-x:50%;
-  --pj-name-y:75%;
-  --pj-name-width:58%;
+  --pj-name-x:55.5%;
+  --pj-name-y:76%;
+  --pj-name-width:38%;
   --pj-name-color:#37271e;
 }
 
 #private-journal[data-theme="rococo-garden"] {
-  --pj-cover-image:url('./assets/themes/rococo-garden.jpg');
+  --pj-cover-image:url('./assets/themes/cutouts/rococo-garden.png');
+  --pj-cover-ratio:.789;
+  --pj-spread-ratio:1.578;
   --pj-accent:#a86f72;
   --pj-accent-soft:#d6aaa6;
-  --pj-cover-position:22%;
-  --pj-name-x:54%;
-  --pj-name-y:51%;
-  --pj-name-width:56%;
+  --pj-name-x:56.5%;
+  --pj-name-y:51.5%;
+  --pj-name-width:36%;
   --pj-name-color:#83604f;
 }
 
 #private-journal[data-theme="indigo-reed"] {
-  --pj-cover-image:url('./assets/themes/indigo-reed.jpg');
+  --pj-cover-image:url('./assets/themes/cutouts/indigo-reed.png');
+  --pj-cover-ratio:.705;
+  --pj-spread-ratio:1.410;
   --pj-accent:#213e5c;
   --pj-accent-soft:#66809a;
-  --pj-cover-position:23%;
-  --pj-name-x:57%;
-  --pj-name-y:28%;
-  --pj-name-width:48%;
-  --pj-name-color:#313533;
+  --pj-name-x:51%;
+  --pj-name-y:19%;
+  --pj-name-width:38%;
+  --pj-name-color:#2e4051;
 }
 
 #private-journal[data-theme="italian-marble"] {
-  --pj-cover-image:url('./assets/themes/italian-marble.jpg');
+  --pj-cover-image:url('./assets/themes/cutouts/italian-marble.png');
+  --pj-cover-ratio:.795;
+  --pj-spread-ratio:1.590;
   --pj-accent:#87512f;
   --pj-accent-soft:#b9805c;
-  --pj-cover-position:27%;
-  --pj-name-x:51%;
-  --pj-name-y:45%;
-  --pj-name-width:44%;
+  --pj-name-x:59%;
+  --pj-name-y:44%;
+  --pj-name-width:30%;
   --pj-name-color:#655040;
 }
 
 #private-journal[data-theme="magnolia-swallow"] {
-  --pj-cover-image:url('./assets/themes/magnolia-swallow.jpg');
+  --pj-cover-image:url('./assets/themes/cutouts/magnolia-swallow.png');
+  --pj-cover-ratio:.737;
+  --pj-spread-ratio:1.474;
   --pj-accent:#8a4c34;
   --pj-accent-soft:#9ca7a0;
-  --pj-cover-position:27%;
-  --pj-name-x:48%;
-  --pj-name-y:36%;
-  --pj-name-width:50%;
+  --pj-name-x:53%;
+  --pj-name-y:31%;
+  --pj-name-width:40%;
   --pj-name-color:#685844;
 }
 
@@ -92,20 +98,19 @@
 
 .pj-scene {
   position:absolute;
-  inset:2vh 2vw;
-  display:grid;
-  grid-template-columns:minmax(150px,.38fr) minmax(600px,1.5fr) minmax(170px,.42fr);
-  align-items:center;
-  gap:clamp(12px,2vw,30px);
+  inset:0;
+  overflow:hidden;
   isolation:isolate;
 }
 
 .pj-book-stage {
-  position:relative;
-  width:100%;
-  height:min(90vh,820px);
-  min-height:560px;
+  position:absolute;
+  top:50%;
+  left:50%;
+  width:min(84vw,calc(88vh * var(--pj-spread-ratio)),1120px);
+  aspect-ratio:var(--pj-spread-ratio);
   perspective:1900px;
+  transform:translate(-50%,-50%);
 }
 
 .pj-cover {
@@ -113,12 +118,12 @@
   top:50%;
   left:50%;
   z-index:5;
-  height:min(84vh,760px);
-  aspect-ratio:.72;
+  height:100%;
+  aspect-ratio:var(--pj-cover-ratio);
   padding:0;
   overflow:visible;
   border:0;
-  border-radius:8px 15px 15px 8px;
+  border-radius:0;
   color:var(--pj-name-color);
   background:transparent;
   box-shadow:none;
@@ -126,24 +131,24 @@
   transform:translate(-50%,-50%) rotateY(0deg);
   transform-origin:left center;
   transform-style:preserve-3d;
-  transition:transform 1.05s cubic-bezier(.18,.72,.16,1),filter .45s ease;
+  filter:drop-shadow(0 27px 24px rgba(48,31,25,.38));
+  transition:transform 1.05s cubic-bezier(.18,.72,.16,1),filter .45s ease,opacity .3s ease;
 }
 
 .pj-cover:hover { filter:brightness(1.035); }
 .pj-cover-face {
   position:absolute;
   inset:0;
-  overflow:hidden;
-  border-radius:8px 15px 15px 8px;
-  box-shadow:0 34px 65px #0009,0 8px 18px #0007;
+  overflow:visible;
+  border-radius:0;
+  box-shadow:none;
   backface-visibility:hidden;
 }
 .pj-cover-front {
-  background-color:#d9c9ab;
   background-image:var(--pj-cover-image);
-  background-position:var(--pj-cover-position) center;
+  background-position:center;
   background-repeat:no-repeat;
-  background-size:auto 100%;
+  background-size:100% 100%;
 }
 .pj-cover-back {
   transform:rotateY(180deg);
@@ -151,7 +156,9 @@
     radial-gradient(circle at 25% 18%,rgba(255,255,255,.42),transparent 29%),
     repeating-linear-gradient(2deg,rgba(91,65,36,.035) 0 1px,transparent 1px 7px),
     #dfd0b2;
-  box-shadow:inset -18px 0 28px #6e503629,0 34px 65px #0007;
+  border-radius:8px 15px 15px 8px;
+  box-shadow:inset -18px 0 28px #6e503629;
+  clip-path:inset(1.2% 1.2% 1.2% 1.2% round 8px 15px 15px 8px);
 }
 .pj-cover-back::after { content:""; position:absolute; inset:22px; border:1px solid #8d704044; border-radius:4px 10px 10px 4px; }
 .pj-cover-shade { position:absolute; inset:0; pointer-events:none; background:linear-gradient(90deg,rgba(0,0,0,.18),transparent 14%,transparent 88%,rgba(0,0,0,.08)); mix-blend-mode:multiply; }
@@ -183,8 +190,8 @@
   top:50%;
   left:50%;
   z-index:4;
-  width:min(69vw,760px);
-  height:min(88vh,800px);
+  width:100%;
+  height:100%;
   display:grid;
   grid-template-rows:auto auto auto 1fr auto;
   border:1px solid #c1ab80;
@@ -197,7 +204,7 @@
     linear-gradient(90deg,#d3c19b 0,#eee3ca 3%,#f1e7d1 51%,#e9dcc1 100%);
   box-shadow:0 32px 75px #0008,inset 23px 0 35px #765b3920,inset -8px 0 16px #70522e12;
   pointer-events:none;
-  transform:translate(-45%,-50%) rotateY(14deg) scale(.93);
+  transform:translate(-50%,-50%) rotateY(10deg) scale(.96);
   transform-origin:left center;
   transition:opacity .24s ease .08s,transform .92s cubic-bezier(.18,.72,.16,1);
 }
@@ -220,13 +227,13 @@
 
 #private-journal.book-open .pj-cover {
   z-index:3;
-  transform:translate(-50%,-50%) rotateY(-162deg) translateZ(2px) scale(.96);
+  transform:translate(0,-50%) rotateY(-178deg) scale(.995);
 }
 
 #private-journal.book-open .pj-book {
   opacity:1;
   pointer-events:auto;
-  transform:translate(-46%,-50%) rotateY(0deg) scale(1);
+  transform:translate(-50%,-50%) rotateY(0deg) scale(1);
 }
 
 .pj-page-turner {
@@ -345,60 +352,65 @@
 .pj-secondary { border:1px solid #856d4e77!important; }
 
 .pj-poem-note {
-  position:relative;
+  position:absolute;
+  left:clamp(16px,3vw,52px);
+  bottom:clamp(22px,5vh,58px);
   z-index:6;
   width:min(100%,210px);
   min-height:165px;
   box-sizing:border-box;
-  justify-self:end;
   padding:34px 23px 23px;
   color:#51473d;
   background:
     repeating-linear-gradient(0deg,transparent 0 25px,rgba(128,97,55,.08) 26px),
     #efe1a9;
   box-shadow:0 18px 35px #0005,0 2px 3px #0003;
-  transform:rotate(-3.2deg);
+  transform:rotate(-5deg);
   clip-path:polygon(2% 1%,98% 0,100% 96%,95% 99%,7% 97%,0 100%,1% 8%);
   pointer-events:none;
+  transition:transform .65s cubic-bezier(.2,.74,.18,1),opacity .25s ease;
 }
+#private-journal.book-open .pj-poem-note { transform:translate(-16px,-96px) rotate(-7deg) scale(.94); }
 .pj-note-tape { position:absolute; top:-9px; left:50%; width:72px; height:25px; background:rgba(224,204,166,.78); box-shadow:0 1px 2px #0002; transform:translateX(-50%) rotate(2deg); }
 .pj-note-mark { position:absolute; top:22px; left:18px; color:var(--pj-accent); font-size:25px; opacity:.6; }
 .pj-note-text { font-size:14px; line-height:1.9; letter-spacing:.03em; }
 .pj-note-source { margin-top:16px; text-align:right; font-size:10px; opacity:.65; }
 
 .pj-ipad {
-  position:relative;
+  position:absolute;
+  right:clamp(14px,3vw,48px);
+  bottom:clamp(24px,5vh,62px);
   z-index:6;
-  width:min(100%,194px);
-  aspect-ratio:.62;
+  width:clamp(148px,13vw,178px);
+  aspect-ratio:.515;
   box-sizing:border-box;
-  justify-self:start;
-  padding:8px;
-  border:1px solid #5d5b58;
-  border-radius:22px;
-  background:linear-gradient(145deg,#333230,#111);
-  box-shadow:0 25px 50px #0007,inset 0 0 0 1px #ffffff22;
-  transform:rotate(2deg);
+  padding:5px;
+  border:1px solid #bd8c86;
+  border-radius:31px;
+  background:linear-gradient(145deg,#f5d8d0,#9d6663 42%,#e9c5bd 84%);
+  box-shadow:0 25px 46px #5b343458,inset 0 0 0 1px #fff9;
+  transform:rotate(3.5deg);
   pointer-events:none;
   transition:transform .65s cubic-bezier(.2,.74,.18,1);
 }
-#private-journal.book-open .pj-ipad { transform:translate(24px,74px) rotate(2deg); }
-.pj-ipad-camera { position:absolute; top:4px; left:50%; z-index:2; width:4px; height:4px; border-radius:50%; background:#080808; box-shadow:0 0 0 1px #555; transform:translateX(-50%); }
-.pj-ipad-screen { position:relative; height:100%; box-sizing:border-box; overflow:hidden; border-radius:16px; padding:16px 14px 13px; color:#25221f; background:linear-gradient(160deg,#fffdf9,#e8e2da); font-family:system-ui,"PingFang SC",sans-serif; text-align:center; }
-.pj-music-app { display:flex; align-items:center; justify-content:center; gap:5px; color:#69635e; font-size:8px; }
-.pj-cloud-dot { width:9px; height:9px; border-radius:50%; background:#d73535; box-shadow:0 0 0 3px #d7353518; }
-.pj-record { display:grid; width:92px; height:92px; margin:17px auto 12px; place-items:center; border-radius:50%; background:repeating-radial-gradient(circle,#161616 0 3px,#292929 4px 6px); box-shadow:0 10px 25px #0004; animation:pj-spin 18s linear infinite; }
+#private-journal.book-open .pj-ipad { transform:translate(58px,14px) rotate(5deg) scale(.95); }
+.pj-ipad::after { content:""; position:absolute; inset:7px; z-index:1; border-radius:24px; pointer-events:none; background:linear-gradient(128deg,rgba(255,255,255,.2),transparent 24%,transparent 70%,rgba(255,255,255,.08)); }
+.pj-ipad-camera { position:absolute; top:10px; left:50%; z-index:3; width:43px; height:13px; border-radius:99px; background:#171311; box-shadow:inset 7px 0 8px #0008; transform:translateX(-50%); }
+.pj-ipad-screen { position:relative; height:100%; box-sizing:border-box; overflow:hidden; border-radius:26px; padding:31px 13px 15px; color:#382b2b; background:radial-gradient(circle at 25% 8%,#fff 0,transparent 25%),linear-gradient(165deg,#fffaf7,#f3e2df 55%,#ead4d2); font-family:system-ui,"PingFang SC",sans-serif; text-align:center; }
+.pj-music-app { display:flex; align-items:center; justify-content:center; gap:5px; color:#9c6d73; font-size:8px; letter-spacing:.05em; }
+.pj-cloud-dot { width:8px; height:8px; border-radius:50%; background:#bf5365; box-shadow:0 0 0 3px #bf53651b; }
+.pj-record { display:grid; width:94px; height:94px; margin:15px auto 12px; place-items:center; border-radius:50%; background:repeating-radial-gradient(circle,#21191b 0 3px,#382b30 4px 6px); box-shadow:0 13px 25px #754c5152; animation:pj-spin 18s linear infinite; }
 .pj-record::before { content:""; width:40px; height:40px; border-radius:50%; background:radial-gradient(circle,#eee 0 4px,var(--pj-accent) 5px 100%); }
 .pj-record-label { position:absolute; z-index:2; color:#fff; font:700 15px/1 Georgia,serif; }
 .pj-now-playing { margin-top:3px; color:#a39a93; font-size:7px; letter-spacing:.16em; }
-.pj-music-title { margin:4px 0 1px; overflow:hidden; font-size:13px; text-overflow:ellipsis; white-space:nowrap; }
+.pj-music-title { margin:5px 0 1px; overflow:hidden; color:#5c3b43; font-size:13px; text-overflow:ellipsis; white-space:nowrap; }
 .pj-music-artist { margin:0; color:#98908a; font-size:8px; }
 .pj-music-lyric { display:block; min-height:42px; margin:12px 0 8px; color:#4b4540; font:11px/1.75 "Noto Serif SC","Songti SC",serif; }
 .pj-music-translation { min-height:28px; margin:-2px 0 7px; color:#8b8179; font:8px/1.55 system-ui,"PingFang SC",sans-serif; }
 .pj-progress { height:2px; margin:11px 2px 9px; overflow:hidden; border-radius:99px; background:#c9c2bc; }
 .pj-progress i { display:block; width:46%; height:100%; background:#d73535; }
 .pj-player-controls { display:flex; align-items:center; justify-content:center; gap:22px; color:#302c29; font-size:18px; }
-.pj-player-controls b { display:grid; width:27px; height:27px; place-items:center; border-radius:50%; color:#fff; background:#d73535; font-size:9px; }
+.pj-player-controls b { display:grid; width:27px; height:27px; place-items:center; border-radius:50%; color:#fff; background:#b65364; font-size:9px; }
 .pj-ipad-home { position:absolute; left:50%; bottom:4px; width:36px; height:3px; border-radius:9px; background:#242424; transform:translateX(-50%); opacity:.55; }
 @keyframes pj-spin { to { transform:rotate(360deg); } }
 
@@ -416,6 +428,7 @@
   box-shadow:0 8px 22px #0005;
   backdrop-filter:blur(9px);
   transform:translateX(-50%);
+  transition:opacity .22s ease;
 }
 .pj-theme-switcher button { display:flex; align-items:center; padding:4px; border:0; border-radius:99px; color:#d7cec4; background:transparent; cursor:pointer; font:9px/1 system-ui,sans-serif; }
 .pj-theme-switcher button span { display:none; }
@@ -432,25 +445,40 @@
 #private-journal-wand-entry { cursor:pointer; }
 
 @media(max-width:1180px) {
-  .pj-scene { grid-template-columns:135px minmax(560px,1fr) 150px; gap:10px; }
-  .pj-poem-note { width:150px; padding:31px 17px 18px; }
+  .pj-poem-note { width:160px; padding:31px 17px 18px; }
   .pj-note-text { font-size:12px; }
-  .pj-ipad { width:150px; }
+  .pj-ipad { width:146px; }
   .pj-record { width:70px; height:70px; margin-top:13px; }
   .pj-music-lyric { font-size:9px; }
-  .pj-book { width:min(69vw,730px); }
 }
 
 @media(max-width:860px) {
   .pj-scene { inset:0; display:block; }
-  .pj-book-stage { height:100%; min-height:0; }
-  .pj-cover { width:88vw; height:auto; max-height:88vh; aspect-ratio:.72; }
+  .pj-book-stage { top:0; left:0; width:100%; height:100%; aspect-ratio:auto; transform:none; }
+  .pj-cover { width:min(86vw,calc(79vh * var(--pj-cover-ratio))); height:auto; max-height:79vh; aspect-ratio:var(--pj-cover-ratio); }
   #private-journal.book-open .pj-cover { opacity:0; pointer-events:none; transform:translate(-50%,-50%) rotateY(-168deg) scale(.96); }
   .pj-book { width:100%; height:100%; border:0; border-radius:0; transform:translate(-50%,-50%) scale(.96); }
   #private-journal.book-open .pj-book { transform:translate(-50%,-50%) scale(1); }
   .pj-bookmark { right:0; top:67px; width:38px; height:145px; border-radius:3px 0 0 3px; }
-  .pj-poem-note,.pj-ipad { display:none!important; }
-  .pj-theme-switcher { bottom:118px; max-width:calc(100vw - 18px); overflow:auto; }
+  .pj-poem-note { left:9px; bottom:68px; width:122px; min-height:100px; padding:25px 13px 13px; opacity:.96; transform:rotate(-6deg); transition:opacity .25s ease; }
+  .pj-note-tape { width:50px; height:18px; }
+  .pj-note-mark { top:16px; left:11px; font-size:18px; }
+  .pj-note-text { font-size:9px; line-height:1.65; }
+  .pj-note-source { margin-top:8px; font-size:7px; }
+  .pj-ipad { right:7px; bottom:68px; width:104px; border-radius:21px; transform:rotate(4deg); transition:opacity .25s ease,transform .25s ease; }
+  .pj-ipad-screen { border-radius:17px; padding:22px 8px 8px; }
+  .pj-ipad-camera { top:7px; width:30px; height:9px; }
+  .pj-record { width:46px; height:46px; margin:7px auto 5px; }
+  .pj-record::before { width:22px; height:22px; }
+  .pj-music-title { font-size:8px; }
+  .pj-music-artist,.pj-music-app,.pj-music-translation { font-size:5px; }
+  .pj-music-lyric { min-height:26px; margin:5px 0; font-size:6px; line-height:1.5; }
+  .pj-progress { margin:5px 2px; }
+  .pj-player-controls { gap:10px; font-size:10px; }
+  .pj-player-controls b { width:17px; height:17px; font-size:6px; }
+  #private-journal.book-open .pj-poem-note,#private-journal.book-open .pj-ipad { visibility:hidden; opacity:0; }
+  #private-journal.book-open .pj-theme-switcher { visibility:hidden; opacity:0; }
+  .pj-theme-switcher { bottom:14px; max-width:calc(100vw - 18px); overflow:auto; }
   .pj-theme-switcher button { padding-right:5px; }
   .pj-theme-switcher button span { display:none; }
   .pj-theme-switcher i { width:20px; height:20px; }

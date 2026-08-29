@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(require.resolve('../index.js'), 'utf8');
+const styleSource = fs.readFileSync(require.resolve('../style.css'), 'utf8');
 const contextValue = {
   uuidv4: undefined,
   extensionSettings: {},
@@ -42,6 +43,11 @@ vm.runInContext(source, sandbox, { filename: 'index.js' });
 
 assert.equal(vm.runInContext('Object.keys(THEMES).length', sandbox), 5);
 assert.equal(vm.runInContext('DEFAULTS.theme', sandbox), 'botanical-noir');
+for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-marble', 'magnolia-swallow']) {
+  assert.match(styleSource, new RegExp(`assets/themes/cutouts/${theme}\\.png`));
+  assert.equal(fs.existsSync(require.resolve(`../assets/themes/cutouts/${theme}.png`)), true);
+}
+assert.match(styleSource, /--pj-spread-ratio/);
 
 const strictPage = vm.runInContext(`parseJson('{"title":"雨后","body":"我们回到了屋檐下。"}', 'daily_note')`, sandbox);
 assert.equal(strictPage.title, '雨后');
