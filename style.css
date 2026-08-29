@@ -85,9 +85,9 @@
   position:absolute;
   inset:0;
   background:
-    linear-gradient(rgba(17,12,9,.25),rgba(17,12,9,.42)),
+    linear-gradient(rgba(91,54,62,.04),rgba(83,48,58,.14)),
     url('./assets/backgrounds/writing-desk.jpg') center/cover no-repeat,
-    #241810;
+    #e8dbca;
 }
 
 .pj-scene {
