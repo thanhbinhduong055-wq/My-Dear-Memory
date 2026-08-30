@@ -77,6 +77,12 @@ assert.match(source, /ConnectionManagerRequestService/);
 assert.match(source, /aria-label="书签目录"/);
 assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
+assert.match(source, /#extensions_settings2,#extensions_settings/);
+assert.match(source, /private-journal-extension-entry/);
+assert.match(source, /pj-quote-capture-preview/);
+assert.match(styleSource, /\.pj-extension-open-button/);
+assert.match(styleSource, /@media\(max-width:860px\)[\s\S]*?width:calc\(100vw - 20px\)/);
+assert.doesNotMatch(styleSource, /@media\(max-width:860px\)[\s\S]*?width:980px/);
 
 const strictPage = vm.runInContext(`parseJson('{"title":"雨后","body":"我们回到了屋檐下。"}', 'daily_note')`, sandbox);
 assert.equal(strictPage.title, '雨后');

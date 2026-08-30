@@ -27,6 +27,8 @@ let customImpressionRequest = '';
 let quoteDraft = '';
 let quoteSpeakerDraft = '';
 let pendingQuoteSelection = null;
+let quoteSelectionRefreshTimer = null;
+let quoteSelectionHideTimer = null;
 let bookOpen = false;
 let mainGenerationActive = false;
 let journalGenerationActive = false;
@@ -1425,6 +1427,9 @@ async function saveQuoteNote(input = {}) {
     quoteDraft = '';
     quoteSpeakerDraft = '';
     pendingQuoteSelection = null;
+    clearTimeout(quoteSelectionRefreshTimer);
+    clearTimeout(quoteSelectionHideTimer);
+    window.getSelection?.()?.removeAllRanges?.();
     hideQuoteCapture();
     if (root?.classList.contains('open')) render();
     setStatus('已收进小纸条');
@@ -1465,15 +1470,53 @@ function hideQuoteCapture() {
   if (capture) capture.hidden = true;
 }
 
+function usesMobileQuoteCapture() {
+  return Boolean(window.matchMedia?.('(max-width: 860px), (pointer: coarse)')?.matches);
+}
+
 function positionQuoteCapture(selectionInfo) {
   const capture = document.querySelector?.('#private-journal-quote-capture');
-  if (!capture || !selectionInfo?.rect) return;
+  if (!capture || !selectionInfo) return;
+  const preview = capture.querySelector?.('.pj-quote-capture-preview');
+  if (preview) {
+    const excerpt = selectionInfo.text.length > 54 ? `${selectionInfo.text.slice(0, 54)}…` : selectionInfo.text;
+    preview.textContent = `“${excerpt}”`;
+  }
   const rect = selectionInfo.rect;
   capture.hidden = false;
+  capture.dataset.mobile = usesMobileQuoteCapture() ? 'true' : 'false';
+  if (capture.dataset.mobile === 'true' || !rect) {
+    capture.style.removeProperty('left');
+    capture.style.removeProperty('top');
+    return;
+  }
   const left = Math.min(Math.max(12, rect.left + rect.width / 2), window.innerWidth - 92);
   const top = Math.min(Math.max(12, rect.bottom + 9), window.innerHeight - 52);
   capture.style.left = `${left}px`;
   capture.style.top = `${top}px`;
+}
+
+function refreshQuoteCapture(delay = 0) {
+  clearTimeout(quoteSelectionRefreshTimer);
+  clearTimeout(quoteSelectionHideTimer);
+  quoteSelectionRefreshTimer = setTimeout(() => {
+    const selected = readChatSelection();
+    if (!selected) {
+      scheduleQuoteCaptureHide(usesMobileQuoteCapture() ? 720 : 120);
+      return;
+    }
+    pendingQuoteSelection = selected;
+    positionQuoteCapture(selected);
+  }, delay);
+}
+
+function scheduleQuoteCaptureHide(delay = 720) {
+  clearTimeout(quoteSelectionHideTimer);
+  quoteSelectionHideTimer = setTimeout(() => {
+    if (readChatSelection()) return;
+    pendingQuoteSelection = null;
+    hideQuoteCapture();
+  }, delay);
 }
 
 function installQuoteCapture() {
@@ -1482,7 +1525,7 @@ function installQuoteCapture() {
   capture.id = 'private-journal-quote-capture';
   capture.type = 'button';
   capture.hidden = true;
-  capture.textContent = '收进小纸条';
+  capture.innerHTML = '<span class="pj-quote-capture-preview"></span><strong>收进小纸条</strong>';
   capture.setAttribute('aria-label', '把选中的对白收进小纸条');
   capture.addEventListener('pointerdown', event => event.preventDefault());
   capture.addEventListener('click', async event => {
@@ -1493,18 +1536,11 @@ function installQuoteCapture() {
   document.body.append(capture);
   document.addEventListener('pointerup', event => {
     if (capture.contains(event.target)) return;
-    setTimeout(() => {
-      const selected = readChatSelection();
-      pendingQuoteSelection = selected;
-      if (selected) positionQuoteCapture(selected);
-      else hideQuoteCapture();
-    }, 0);
+    refreshQuoteCapture(usesMobileQuoteCapture() ? 240 : 0);
   });
   document.addEventListener('selectionchange', () => {
-    if (!window.getSelection?.()?.toString().trim()) {
-      pendingQuoteSelection = null;
-      hideQuoteCapture();
-    }
+    if (window.getSelection?.()?.toString().trim()) refreshQuoteCapture(usesMobileQuoteCapture() ? 180 : 0);
+    else scheduleQuoteCaptureHide();
   });
 }
 
@@ -2036,8 +2072,9 @@ function makeJournalStagePannable() {
   scene.addEventListener('pointermove', event => {
     if (!drag || drag.id !== event.pointerId) return;
     event.preventDefault();
-    const maxX = Math.max(120, window.innerWidth * 0.82);
-    const maxY = Math.max(60, window.innerHeight * 0.28);
+    const stage = root?.querySelector('.pj-book-stage')?.getBoundingClientRect?.();
+    const maxX = Math.max(0, ((stage?.width || 0) - window.innerWidth) / 2 + 10);
+    const maxY = Math.max(0, ((stage?.height || 0) - window.innerHeight) / 2 + 10);
     mobilePan.x = Math.max(-maxX, Math.min(maxX, drag.originX + event.clientX - drag.x));
     mobilePan.y = Math.max(-maxY, Math.min(maxY, drag.originY + event.clientY - drag.y));
     applyMobilePan();
@@ -2127,13 +2164,35 @@ function installWandMenuEntry() {
   return true;
 }
 
-function watchWandMenuEntry() {
+function installExtensionDrawerEntry() {
+  if (document.querySelector('#private-journal-extension-entry')) return true;
+  const extensionsDrawer = document.querySelector('#extensions_settings2,#extensions_settings');
+  if (!extensionsDrawer) return false;
+  const entry = document.createElement('div');
+  entry.id = 'private-journal-extension-entry';
+  entry.className = 'extension_container pj-extension-entry';
+  entry.innerHTML = `<button type="button" class="menu_button pj-extension-open-button" aria-label="打开私语手札">
+    <span class="fa-solid fa-book-open" aria-hidden="true"></span>
+    <span class="pj-extension-entry-copy"><strong>私语手札</strong><small>打开当前聊天的私人手札</small></span>
+    <span class="fa-solid fa-chevron-right" aria-hidden="true"></span>
+  </button>`;
+  entry.querySelector('button')?.addEventListener('click', openJournal);
+  extensionsDrawer.prepend(entry);
+  return true;
+}
+
+function installJournalMenuEntries() {
   installWandMenuEntry();
+  installExtensionDrawerEntry();
+}
+
+function watchWandMenuEntry() {
+  installJournalMenuEntries();
   if (wandMenuObserver || typeof MutationObserver !== 'function') return;
-  wandMenuObserver = new MutationObserver(() => installWandMenuEntry());
+  wandMenuObserver = new MutationObserver(() => installJournalMenuEntries());
   wandMenuObserver.observe(document.body, { childList: true, subtree: true });
   const wand = document.querySelector('#extensionsMenuButton');
-  wand?.addEventListener('click', () => requestAnimationFrame(installWandMenuEntry));
+  wand?.addEventListener('click', () => requestAnimationFrame(installJournalMenuEntries));
 }
 
 async function initialize() {
