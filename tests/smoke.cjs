@@ -47,6 +47,8 @@ vm.runInContext(source, sandbox, { filename: 'index.js' });
 
 assert.equal(vm.runInContext('Object.keys(THEMES).length', sandbox), 5);
 assert.equal(vm.runInContext('DEFAULTS.theme', sandbox), 'botanical-noir');
+assert.equal(vm.runInContext('DEFAULTS.generationApiMode', sandbox), 'main');
+assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-marble', 'magnolia-swallow']) {
   assert.match(styleSource, new RegExp(`assets/themes/cutouts/${theme}\\.png`));
   assert.equal(fs.existsSync(require.resolve(`../assets/themes/cutouts/${theme}.png`)), true);
@@ -56,6 +58,11 @@ assert.match(source, /class="pj-scene-close"/);
 assert.match(source, /class="pj-cover-art"/);
 assert.match(styleSource, /#private-journal \.pj-cover-art\s*\{/);
 assert.match(styleSource, /object-fit:fill!important/);
+assert.match(styleSource, /--pj-font-cover:/);
+assert.match(styleSource, /font-family:var\(--pj-font-cover\)/);
+assert.match(styleSource, /--pj-name-y:39%/);
+assert.match(source, /class="pj-api-router-host"/);
+assert.match(source, /ConnectionManagerRequestService/);
 assert.match(source, /aria-label="书签目录"/);
 assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
@@ -264,6 +271,56 @@ assert.equal(vm.runInContext(`observeStoryDay(datedTimelineBook, { signature: 'd
   assert.equal(result, '正文 API 的返回内容');
   assert.equal(receivedOptions.quietPrompt, '写一页日记');
   assert.equal(receivedOptions.skipWIAN, false);
+
+  let secondaryRequest;
+  contextValue.characters = [{
+    name: '陈砚',
+    avatar: 'chenyan.png',
+    data: {
+      description: '陈砚是沉静克制的人。',
+      personality: '温柔，但不轻易表达。',
+      scenario: '两个人住在临江的旧宅。',
+    },
+  }];
+  contextValue.characterId = 0;
+  contextValue.name1 = '姜藏';
+  contextValue.name2 = '陈砚';
+  contextValue.powerUserSettings = { persona_description: '姜藏写字克制，句子很短。' };
+  contextValue.maxContext = 8192;
+  contextValue.extensionPrompts = { note: { value: '作者注释：只写已经发生的事。' } };
+  contextValue.substituteParams = text => text;
+  contextValue.getWorldInfoPrompt = async (chat, maxContext, dryRun, globalScanData) => {
+    assert.equal(chat[0].includes('陈砚'), true);
+    assert.equal(maxContext, 8192);
+    assert.equal(dryRun, true);
+    assert.match(globalScanData.personaDescription, /姜藏写字克制/);
+    return { worldInfoBefore: '世界书：旧宅临江。', worldInfoAfter: '', worldInfoDepth: [] };
+  };
+  contextValue.ConnectionManagerRequestService = {
+    getSupportedProfiles: () => [{ id: 'secondary-1', name: '手札副模型', model: 'diary-model' }],
+    sendRequest: async (profileId, messages, maxTokens, options) => {
+      secondaryRequest = { profileId, messages, maxTokens, options };
+      return { content: '副 API 的返回内容' };
+    },
+  };
+  Object.assign(contextValue.extensionSettings.st_private_journal, {
+    generationApiMode: 'secondary',
+    secondaryProfileId: 'secondary-1',
+  });
+  contextValue.chat = [
+    { is_user: true, is_system: false, mes: '今晚雨很大。' },
+    { is_user: false, is_system: false, mes: '那就向我这边走。' },
+  ];
+  const secondaryResult = await vm.runInContext(`callJournalApi('整理今天的相处日记')`, sandbox);
+  assert.equal(secondaryResult, '副 API 的返回内容');
+  assert.equal(secondaryRequest.profileId, 'secondary-1');
+  assert.equal(secondaryRequest.maxTokens, 2800);
+  assert.equal(secondaryRequest.options.stream, false);
+  assert.match(secondaryRequest.messages[0].content, /陈砚是沉静克制的人/);
+  assert.match(secondaryRequest.messages[0].content, /姜藏写字克制/);
+  assert.match(secondaryRequest.messages[0].content, /世界书：旧宅临江/);
+  assert.equal(secondaryRequest.messages.at(-1).content, '整理今天的相处日记');
+  contextValue.extensionSettings.st_private_journal.generationApiMode = 'main';
 
   let batchApiCalls = 0;
   contextValue.generateQuietPrompt = async () => {

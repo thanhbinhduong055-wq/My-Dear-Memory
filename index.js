@@ -6,6 +6,8 @@ const DEFAULTS = {
   language: 'zh-CN',
   followMainGeneration: true,
   theme: 'botanical-noir',
+  generationApiMode: 'main',
+  secondaryProfileId: '',
   launcherPosition: null,
 };
 
@@ -585,6 +587,183 @@ async function callCurrentMainApi(prompt) {
   return result;
 }
 
+function secondaryProfiles() {
+  const service = ctx().ConnectionManagerRequestService;
+  if (typeof service?.getSupportedProfiles !== 'function') return [];
+  try {
+    return service.getSupportedProfiles().filter(profile => profile?.id);
+  } catch (error) {
+    console.warn('[Private Journal] Unable to read Connection Profiles', error);
+    return [];
+  }
+}
+
+function profileDisplayName(profile) {
+  const name = String(profile?.name || '').trim();
+  const model = String(profile?.model || '').trim();
+  return name || model || '未命名连接配置';
+}
+
+function firstText(...values) {
+  const value = values.find(item => typeof item === 'string' && item.trim());
+  return value?.trim() || '';
+}
+
+function activeCharacterContext(context) {
+  const character = context.characters?.[context.characterId] || {};
+  const data = character.data || character;
+  return {
+    description: firstText(data.description, character.description),
+    personality: firstText(data.personality, character.personality),
+    scenario: firstText(data.scenario, character.scenario),
+    examples: firstText(data.mes_example, character.mes_example),
+    depthPrompt: firstText(data.extensions?.depth_prompt?.prompt, character.data?.extensions?.depth_prompt?.prompt),
+    creatorNotes: firstText(data.creator_notes, data.creatorcomment, character.creator_notes),
+  };
+}
+
+function userPersonaContext(context) {
+  return firstText(
+    context.powerUserSettings?.persona_description,
+    context.powerUserSettings?.personaDescription,
+    context.chatMetadata?.persona_description,
+  );
+}
+
+function flattenWorldInfo(result) {
+  if (!result) return '';
+  const parts = [result.worldInfoBefore, result.worldInfoAfter];
+  for (const group of [result.worldInfoDepth, result.worldInfoExamples, result.anBefore, result.anAfter]) {
+    if (!Array.isArray(group)) continue;
+    for (const entry of group) {
+      if (typeof entry === 'string') parts.push(entry);
+      else if (Array.isArray(entry?.entries)) parts.push(entry.entries.join('\n'));
+      else parts.push(entry?.content);
+    }
+  }
+  return [...new Set(parts.map(part => String(part || '').trim()).filter(Boolean))].join('\n\n');
+}
+
+function clipContextText(text, maxLength = 26000) {
+  const value = String(text || '');
+  if (value.length <= maxLength) return value;
+  const edge = Math.floor((maxLength - 32) / 2);
+  return `${value.slice(0, edge)}\n\n〔中间较早内容已省略〕\n\n${value.slice(-edge)}`;
+}
+
+function packRecentChat(messages, maxLength = 18000) {
+  const packed = [];
+  let remaining = maxLength;
+  for (let index = messages.length - 1; index >= 0 && remaining > 400; index -= 1) {
+    const message = messages[index];
+    const content = clipContextText(message.mes, Math.min(5000, remaining));
+    remaining -= content.length;
+    packed.unshift({ role: message.is_user ? 'user' : 'assistant', content });
+  }
+  return packed;
+}
+
+function mergeAdjacentRoles(messages) {
+  const merged = [];
+  for (const message of messages) {
+    const previous = merged.at(-1);
+    if (previous?.role === message.role) previous.content += `\n\n${message.content}`;
+    else merged.push({ ...message });
+  }
+  return merged;
+}
+
+async function buildSecondaryApiMessages(prompt) {
+  const context = ctx();
+  const id = identity();
+  const character = activeCharacterContext(context);
+  const persona = userPersonaContext(context);
+  const visibleChat = (Array.isArray(context.chat) ? context.chat : [])
+    .filter(message => !message?.is_system && typeof message?.mes === 'string' && message.mes.trim())
+    .slice(-28);
+  const scanChat = visibleChat.map(message => `${message.is_user ? id.userName : id.characterName}: ${message.mes}`).reverse();
+  let worldInfo = '';
+  if (typeof context.getWorldInfoPrompt === 'function') {
+    try {
+      const result = await context.getWorldInfoPrompt(scanChat, Number(context.maxContext) || 8192, true, {
+        trigger: 'quiet',
+        personaDescription: persona,
+        characterDescription: character.description,
+        characterPersonality: character.personality,
+        characterDepthPrompt: character.depthPrompt,
+        scenario: character.scenario,
+        creatorNotes: character.creatorNotes,
+      });
+      worldInfo = flattenWorldInfo(result);
+    } catch (error) {
+      console.warn('[Private Journal] World Info scan failed for secondary API', error);
+    }
+  }
+
+  const extensionNotes = Object.values(context.extensionPrompts || {})
+    .map(item => firstText(item?.value, item?.content))
+    .filter(Boolean)
+    .join('\n\n');
+  const sections = [
+    `当前 User：${id.userName}\n当前 Char：${id.characterName}`,
+    character.description && `〔Char 设定〕\n${character.description}`,
+    character.personality && `〔Char 性格〕\n${character.personality}`,
+    character.scenario && `〔当前场景〕\n${character.scenario}`,
+    character.depthPrompt && `〔Char 补充设定〕\n${character.depthPrompt}`,
+    character.examples && `〔Char 对话风格参考〕\n${character.examples}`,
+    persona && `〔User Persona 与表达风格〕\n${persona}`,
+    worldInfo && `〔当前激活世界书〕\n${worldInfo}`,
+    extensionNotes && `〔当前扩展记忆与作者注释〕\n${extensionNotes}`,
+  ].filter(Boolean).join('\n\n');
+  let substituted = sections;
+  if (typeof context.substituteParams === 'function') {
+    try { substituted = context.substituteParams(sections) || sections; }
+    catch (error) { console.warn('[Private Journal] Macro substitution failed for secondary API', error); }
+  }
+  const history = packRecentChat(visibleChat);
+
+  return mergeAdjacentRoles([
+    {
+      role: 'system',
+      content: `你正在整理 User 私人的关系手札。下列角色卡、User Persona、世界书和对话只用于理解事实、关系与 User 的语言风格；最终必须严格执行最后一条手札写作要求。\n\n${clipContextText(substituted, 15000)}`,
+    },
+    ...history,
+    { role: 'user', content: prompt },
+  ]);
+}
+
+async function callSecondaryApi(prompt) {
+  const context = ctx();
+  const settings = getSettings();
+  const service = context.ConnectionManagerRequestService;
+  if (typeof service?.sendRequest !== 'function') {
+    throw new Error('当前 SillyTavern 不支持副 API 连接配置，请升级到 1.15.0 或更新版本');
+  }
+  if (!settings.secondaryProfileId) {
+    throw new Error('尚未选择副 API 的连接配置');
+  }
+  const profile = secondaryProfiles().find(item => item.id === settings.secondaryProfileId);
+  if (!profile) {
+    throw new Error('所选副 API 连接配置不存在或暂不支持文本生成');
+  }
+  const messages = await buildSecondaryApiMessages(prompt);
+  const result = await service.sendRequest(settings.secondaryProfileId, messages, 2800, {
+    stream: false,
+    extractData: true,
+    includePreset: true,
+    includeInstruct: true,
+  });
+  const content = typeof result === 'string' ? result : result?.content;
+  if (typeof content !== 'string' || !content.trim()) throw new Error('副 API 返回了空内容');
+  return content;
+}
+
+async function callJournalApi(prompt) {
+  return getSettings().generationApiMode === 'secondary'
+    ? callSecondaryApi(prompt)
+    : callCurrentMainApi(prompt);
+}
+
 async function checkRelationship() {
   if (mainGenerationActive || journalGenerationActive || relationshipCheckActive) {
     toastr.info('请等待当前生成结束后再判定关系。', '私语手札');
@@ -594,7 +773,7 @@ async function checkRelationship() {
   setStatus('正在依据当前故事判定关系…');
   renderControls();
   try {
-    const result = await callCurrentMainApi(buildRelationshipPrompt());
+    const result = await callJournalApi(buildRelationshipPrompt());
     currentBook.relationship = parseRelationship(result);
     await saveBook();
     setStatus(isRomanceUnlocked() ? '已确认伴侣关系，恋爱日记已解锁' : '尚未确认伴侣关系');
@@ -664,12 +843,13 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
 
   journalGenerationActive = true;
   setGeneratingUi(true);
-  setStatus(source === 'auto' ? '正文完成，正在生成手札…' : '正在调用当前正文 API…');
+  const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
+  setStatus(source === 'auto' ? `正文完成，正在用${apiLabel}生成手札…` : `正在调用${apiLabel}…`);
   try {
     const generationOptions = type === 'impression'
       ? { impressionFocus: activeImpressionFocus, customRequest: customImpressionRequest }
       : {};
-    const result = await callCurrentMainApi(buildPrompt(type, generationOptions));
+    const result = await callJournalApi(buildPrompt(type, generationOptions));
     const page = parseJson(result, type);
     page.id = createId();
     page.type = type;
@@ -716,9 +896,10 @@ async function generateBatch({ captureSignature = null } = {}) {
   const batchOptions = { impressionFocus: focusKey, customRequest: customImpressionRequest };
   journalGenerationActive = true;
   setGeneratingUi(true);
-  setStatus('正文完成，正在用一次 API 同步全部手札…');
+  const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
+  setStatus(`正文完成，正在用一次${apiLabel}同步全部手札…`);
   try {
-    const result = await callCurrentMainApi(buildBatchPrompt(batchOptions));
+    const result = await callJournalApi(buildBatchPrompt(batchOptions));
     const batch = parseBatch(result);
     const manualRelationship = targetBook.relationship?.source === 'user' && targetBook.relationship?.status === 'partners';
     if (!manualRelationship) targetBook.relationship = batch.relationship;
@@ -1192,6 +1373,38 @@ function renderControls() {
   controls.hidden = true;
 }
 
+function renderApiRouter() {
+  const host = root?.querySelector('.pj-api-router-host');
+  if (!host) return;
+  const settings = getSettings();
+  const profiles = secondaryProfiles();
+  const selectedProfile = profiles.find(profile => profile.id === settings.secondaryProfileId);
+  const previousDetails = host.querySelector('.pj-api-router');
+  const wasOpen = Boolean(previousDetails?.open);
+  const mode = settings.generationApiMode === 'secondary' ? 'secondary' : 'main';
+  const summary = mode === 'secondary'
+    ? `副 API · ${selectedProfile ? profileDisplayName(selectedProfile) : '未选择'}`
+    : '跟随正文 API';
+  const options = profiles.length
+    ? profiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === settings.secondaryProfileId ? 'selected' : ''}>${escapeHtml(profileDisplayName(profile))}${profile.model && profile.model !== profileDisplayName(profile) ? ` · ${escapeHtml(profile.model)}` : ''}</option>`).join('')
+    : '<option value="">没有可用的连接配置</option>';
+
+  host.innerHTML = `<details class="pj-api-router" ${wasOpen ? 'open' : ''}>
+    <summary><span>生成接口</span><strong>${escapeHtml(summary)}</strong></summary>
+    <div class="pj-api-popover">
+      <div class="pj-api-mode" role="radiogroup" aria-label="选择手札生成接口">
+        <label><input type="radio" name="pj-generation-api" data-setting="generationApiMode" value="main" ${mode === 'main' ? 'checked' : ''}><span><strong>跟随正文 API</strong><small>沿用当前角色回复的模型与设定</small></span></label>
+        <label><input type="radio" name="pj-generation-api" data-setting="generationApiMode" value="secondary" ${mode === 'secondary' ? 'checked' : ''}><span><strong>使用副 API</strong><small>从 SillyTavern 连接配置中选择</small></span></label>
+      </div>
+      <div class="pj-profile-picker" ${mode === 'main' ? 'hidden' : ''}>
+        <label for="pj-secondary-profile">副 API 连接配置</label>
+        <div><select id="pj-secondary-profile" data-setting="secondaryProfileId" ${profiles.length ? '' : 'disabled'}>${options}</select><button type="button" class="pj-text-button" data-action="refresh-api-profiles">刷新</button></div>
+        <p>先在 SillyTavern 的“API 连接 → 连接配置”中新增或导入。密钥由 SillyTavern 保存，本插件不会复制或导出。</p>
+      </div>
+    </div>
+  </details>`;
+}
+
 function render() {
   if (!root || !currentBook) return;
   const id = identity();
@@ -1207,6 +1420,7 @@ function render() {
     : `<div class="pj-empty">${escapeHtml(PAGE_TYPES[activeType]?.empty || '纸页还是空白。')}<br><small>${activeType === 'romance_diary' && !isRomanceUnlocked() ? '先确认关系，再记录只属于恋人的篇章。' : activeType === 'quote_note' ? '在正文里选中对白即可收藏，不会消耗 API。' : '生成后会独立保存于当前栏目。'}</small></div>`;
   const follow = root.querySelector('[data-setting="followMainGeneration"]');
   if (follow) follow.checked = Boolean(getSettings().followMainGeneration);
+  renderApiRouter();
   setGeneratingUi(journalGenerationActive);
   const generateButton = root.querySelector('[data-action="generate"]');
   if (generateButton && activeType === 'romance_diary' && !isRomanceUnlocked()) generateButton.disabled = true;
@@ -1259,6 +1473,10 @@ function bind() {
     if (action === 'reset-relationship') await resetRelationship();
     if (action === 'export') exportBook();
     if (action === 'export-word') exportWordDocument();
+    if (action === 'refresh-api-profiles') {
+      renderApiRouter();
+      toastr.info('已刷新 SillyTavern 连接配置列表。', '私语手札');
+    }
     if (deleteId) {
       event.preventDefault();
       event.stopPropagation();
@@ -1278,6 +1496,23 @@ function bind() {
       getSettings().followMainGeneration = event.target.checked;
       ctx().saveSettingsDebounced?.();
       setStatus(event.target.checked ? '已开启：故事跨日后一次整理全部栏目' : '已关闭自动整理');
+    }
+    if (event.target.matches('[data-setting="generationApiMode"]')) {
+      const mode = event.target.value === 'secondary' ? 'secondary' : 'main';
+      const settings = getSettings();
+      settings.generationApiMode = mode;
+      if (mode === 'secondary' && !settings.secondaryProfileId) {
+        settings.secondaryProfileId = secondaryProfiles()[0]?.id || '';
+      }
+      ctx().saveSettingsDebounced?.();
+      renderApiRouter();
+      setStatus(mode === 'secondary' ? '手札将使用所选副 API' : '手札将跟随正文 API');
+    }
+    if (event.target.matches('[data-setting="secondaryProfileId"]')) {
+      getSettings().secondaryProfileId = event.target.value;
+      ctx().saveSettingsDebounced?.();
+      renderApiRouter();
+      setStatus(event.target.value ? '已切换副 API 连接配置' : '请选择副 API 连接配置');
     }
   });
 }
@@ -1380,7 +1615,7 @@ async function initialize() {
         <div class="pj-page-turner" aria-hidden="true"></div>
         <nav><h1 class="pj-title"></h1><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
         <div class="pj-tabs" role="tablist" aria-label="书签目录"></div><div class="pj-controls"></div><main class="pj-pages"></main>
-        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
+        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><div class="pj-api-router-host"></div><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
       </div>
     </div>
     <div class="pj-theme-switcher" role="group" aria-label="选择手札主题"></div>
