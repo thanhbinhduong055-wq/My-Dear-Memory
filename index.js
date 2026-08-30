@@ -6,6 +6,7 @@ const DEFAULTS = {
   language: 'zh-CN',
   followMainGeneration: true,
   theme: 'botanical-noir',
+  desk: 'pearl-cream',
   generationApiMode: 'main',
   secondaryProfileId: '',
   launcherPosition: null,
@@ -79,8 +80,15 @@ const THEMES = {
   'magnolia-swallow': { label: '玉兰燕影', shortLabel: '玉兰', asset: './assets/themes/cutouts/magnolia-swallow.png' },
 };
 
-function themeAssetUrl(themeKey) {
-  const asset = THEMES[themeKey]?.asset || THEMES[DEFAULTS.theme].asset;
+const DESKS = {
+  'pearl-cream': { label: '珍珠奶油', shortLabel: '珍珠', asset: './assets/backgrounds/writing-desk.jpg' },
+  'forest-walnut': { label: '暮林胡桃', shortLabel: '暮林', asset: './assets/backgrounds/forest-walnut.png' },
+  'light-ash': { label: '浅木芦影', shortLabel: '浅木', asset: './assets/backgrounds/light-ash.png' },
+  'olive-warmwood': { label: '橄榄暖木', shortLabel: '暖木', asset: './assets/backgrounds/olive-warmwood.png' },
+  'magnolia-inkstone': { label: '玉兰墨砚', shortLabel: '墨砚', asset: './assets/backgrounds/magnolia-inkstone.png' },
+};
+
+function extensionAssetUrl(asset) {
   let baseUrl = EXTENSION_SCRIPT_URL;
   if (!baseUrl && document.styleSheets) {
     for (const sheet of document.styleSheets) {
@@ -93,6 +101,14 @@ function themeAssetUrl(themeKey) {
   }
   if (!baseUrl) return asset;
   try { return new URL(asset, baseUrl).href; } catch (error) { return asset; }
+}
+
+function themeAssetUrl(themeKey) {
+  return extensionAssetUrl(THEMES[themeKey]?.asset || THEMES[DEFAULTS.theme].asset);
+}
+
+function deskAssetUrl(deskKey) {
+  return extensionAssetUrl(DESKS[deskKey]?.asset || DESKS[DEFAULTS.desk].asset);
 }
 
 function ctx() {
@@ -1321,14 +1337,23 @@ function renderAccessories() {
   const id = identity();
   const settings = getSettings();
   const themeKey = THEMES[settings.theme] ? settings.theme : DEFAULTS.theme;
+  const deskKey = DESKS[settings.desk] ? settings.desk : DEFAULTS.desk;
   settings.theme = themeKey;
+  settings.desk = deskKey;
   root.dataset.theme = themeKey;
+  root.dataset.desk = deskKey;
   root.classList.toggle('book-open', bookOpen);
 
   const coverArt = root.querySelector('.pj-cover-art');
   if (coverArt) {
     const nextSource = themeAssetUrl(themeKey);
     if (coverArt.getAttribute('src') !== nextSource) coverArt.setAttribute('src', nextSource);
+  }
+
+  const deskArt = root.querySelector('.pj-desk-art');
+  if (deskArt) {
+    const nextSource = deskAssetUrl(deskKey);
+    if (deskArt.getAttribute('src') !== nextSource) deskArt.setAttribute('src', nextSource);
   }
 
   const coverUser = root.querySelector('.pj-cover-user');
@@ -1341,7 +1366,13 @@ function renderAccessories() {
   const switcher = root.querySelector('.pj-theme-switcher');
   if (switcher) {
     switcher.innerHTML = Object.entries(THEMES).map(([key, theme]) =>
-      `<button class="${key === themeKey ? 'active' : ''}" data-theme-option="${key}" title="${escapeHtml(theme.label)}"><i></i><span>${escapeHtml(theme.shortLabel)}</span></button>`).join('');
+      `<button class="${key === themeKey ? 'active' : ''}" data-theme-option="${key}" title="${escapeHtml(theme.label)}" aria-label="封面：${escapeHtml(theme.label)}" aria-pressed="${key === themeKey}"><i aria-hidden="true"></i><span>${escapeHtml(theme.shortLabel)}</span></button>`).join('');
+  }
+
+  const deskSwitcher = root.querySelector('.pj-desk-switcher');
+  if (deskSwitcher) {
+    deskSwitcher.innerHTML = Object.entries(DESKS).map(([key, desk]) =>
+      `<button class="${key === deskKey ? 'active' : ''}" data-desk-option="${key}" title="${escapeHtml(desk.label)}" aria-label="桌面：${escapeHtml(desk.label)}" aria-pressed="${key === deskKey}"><i aria-hidden="true"></i><span>${escapeHtml(desk.shortLabel)}</span></button>`).join('');
   }
 
 }
@@ -1446,12 +1477,18 @@ function bind() {
     const type = event.target.closest('[data-type]')?.dataset.type;
     const impressionFocus = event.target.closest('[data-impression-focus]')?.dataset.impressionFocus;
     const themeOption = event.target.closest('[data-theme-option]')?.dataset.themeOption;
+    const deskOption = event.target.closest('[data-desk-option]')?.dataset.deskOption;
     const action = event.target.closest('[data-action]')?.dataset.action;
     const deleteId = event.target.closest('[data-delete]')?.dataset.delete;
     if (type) turnToType(type);
     if (impressionFocus) { activeImpressionFocus = impressionFocus; render(); }
     if (themeOption && THEMES[themeOption]) {
       getSettings().theme = themeOption;
+      ctx().saveSettingsDebounced?.();
+      renderAccessories();
+    }
+    if (deskOption && DESKS[deskOption]) {
+      getSettings().desk = deskOption;
       ctx().saveSettingsDebounced?.();
       renderAccessories();
     }
@@ -1603,7 +1640,7 @@ async function initialize() {
   root = document.createElement('section');
   root.id = 'private-journal';
   root.lang = getSettings().language || 'zh-CN';
-  root.innerHTML = `<div class="pj-backdrop" data-action="close"></div><div class="pj-scene">
+  root.innerHTML = `<div class="pj-backdrop" data-action="close"><img class="pj-desk-art" src="${escapeHtml(deskAssetUrl(getSettings().desk))}" alt="" draggable="false"></div><div class="pj-scene">
     <button class="pj-scene-close" data-action="close" aria-label="关闭私语手札" title="关闭">×</button>
     <div class="pj-book-stage">
       <button class="pj-cover" data-action="toggle-book" aria-label="翻开或合上手札">
@@ -1618,7 +1655,10 @@ async function initialize() {
         <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><div class="pj-api-router-host"></div><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
       </div>
     </div>
-    <div class="pj-theme-switcher" role="group" aria-label="选择手札主题"></div>
+    <div class="pj-style-palette" aria-label="选择手札装帧">
+      <div class="pj-style-row"><span class="pj-style-label">封面</span><div class="pj-theme-switcher" role="group" aria-label="选择手札封面"></div></div>
+      <div class="pj-style-row"><span class="pj-style-label">桌面</span><div class="pj-desk-switcher" role="group" aria-label="选择桌面背景"></div></div>
+    </div>
   </div>`;
   document.body.append(root);
   bind();

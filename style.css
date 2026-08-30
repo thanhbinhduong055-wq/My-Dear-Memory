@@ -15,6 +15,7 @@
   --pj-text-body:clamp(16px,1.02vw,17px);
   --pj-leading-body:1.92;
   --pj-cover-image:url('./assets/themes/cutouts/botanical-noir.png');
+  --pj-desk-tint:linear-gradient(rgba(91,54,62,.04),rgba(83,48,58,.14));
   --pj-cover-ratio:.746;
   --pj-spread-ratio:1.492;
   --pj-name-x:55.5%;
@@ -97,14 +98,20 @@
   --pj-name-color:#685844;
 }
 
+#private-journal[data-desk="pearl-cream"] { --pj-desk-tint:linear-gradient(rgba(91,54,62,.04),rgba(83,48,58,.14)); }
+#private-journal[data-desk="forest-walnut"] { --pj-desk-tint:linear-gradient(rgba(13,10,7,.04),rgba(13,9,6,.12)); }
+#private-journal[data-desk="light-ash"] { --pj-desk-tint:linear-gradient(rgba(255,248,230,.03),rgba(112,83,48,.05)); }
+#private-journal[data-desk="olive-warmwood"] { --pj-desk-tint:linear-gradient(rgba(66,35,17,.02),rgba(55,26,12,.1)); }
+#private-journal[data-desk="magnolia-inkstone"] { --pj-desk-tint:linear-gradient(rgba(29,19,13,.02),rgba(25,15,10,.09)); }
+
 .pj-backdrop {
   position:absolute;
   inset:0;
-  background:
-    linear-gradient(rgba(91,54,62,.04),rgba(83,48,58,.14)),
-    url('./assets/backgrounds/writing-desk.jpg') center/cover no-repeat,
-    #e8dbca;
+  overflow:hidden;
+  background:#e8dbca;
 }
+.pj-desk-art { position:absolute; inset:0; display:block; width:100%; height:100%; object-fit:cover; object-position:center; }
+.pj-backdrop::after { content:""; position:absolute; inset:0; pointer-events:none; background:var(--pj-desk-tint); }
 
 .pj-scene {
   position:absolute;
@@ -549,31 +556,50 @@
 #private-journal-quote-capture:hover { color:#fffaf3; background:#884d58; transform:translateX(-50%) rotate(0deg) translateY(-2px); }
 #private-journal-quote-capture:focus-visible { outline:2px solid #884d58; outline-offset:3px; }
 
-.pj-theme-switcher {
+.pj-style-palette {
   position:absolute;
   top:clamp(16px,3vw,38px);
   left:clamp(16px,3vw,38px);
   z-index:9;
   display:grid;
-  gap:6px;
-  padding:10px;
+  gap:8px;
+  padding:10px 11px;
   border:1px solid rgba(116,72,76,.14);
-  border-radius:18px;
-  background:rgba(255,249,246,.7);
+  border-radius:15px;
+  background:rgba(255,249,244,.78);
   box-shadow:0 14px 34px rgba(79,45,47,.16);
   backdrop-filter:blur(14px);
-  transition:opacity .22s ease;
+  transition-property:opacity,transform,visibility;
+  transition-duration:180ms;
+  transition-timing-function:cubic-bezier(.2,0,0,1);
 }
-.pj-theme-switcher::before { content:"选择封面"; padding:2px 4px 5px; color:#76585b; font:8px/1 system-ui,sans-serif; letter-spacing:.18em; }
-.pj-theme-switcher button { display:flex; align-items:center; gap:8px; min-width:82px; padding:5px 8px 5px 5px; border:0; border-radius:99px; color:#765f61; background:transparent; cursor:pointer; font:9px/1 system-ui,sans-serif; }
-.pj-theme-switcher button span { display:block; }
-.pj-theme-switcher button.active { color:#fff; background:var(--pj-accent); box-shadow:0 5px 13px color-mix(in srgb,var(--pj-accent) 24%,transparent); }
-.pj-theme-switcher i { flex:0 0 auto; width:20px; height:20px; border-radius:50%; box-shadow:inset 0 0 0 1px #ffffff66,0 2px 6px #573b3b22; }
+.pj-style-row { display:grid; grid-template-columns:32px auto; align-items:center; gap:7px; }
+.pj-style-label { color:#76585b; font:600 9px/1 var(--pj-font-ui); letter-spacing:.12em; text-align:center; }
+.pj-theme-switcher,.pj-desk-switcher { display:grid; grid-template-columns:repeat(5,30px); gap:4px; }
+#private-journal .pj-theme-switcher button,
+#private-journal .pj-desk-switcher button { position:relative; display:grid; width:30px; height:30px; min-width:0; padding:0!important; place-items:center; border:1px solid transparent!important; border-radius:8px; color:#765f61; background:transparent!important; box-shadow:none; cursor:pointer; transition-property:background-color,border-color,box-shadow,scale; transition-duration:140ms; transition-timing-function:cubic-bezier(.2,0,0,1); }
+#private-journal .pj-theme-switcher button:hover,
+#private-journal .pj-desk-switcher button:hover { background:rgba(113,60,70,.08)!important; }
+#private-journal .pj-theme-switcher button.active,
+#private-journal .pj-desk-switcher button.active { border-color:color-mix(in srgb,var(--pj-accent) 66%,transparent)!important; background:color-mix(in srgb,var(--pj-accent) 11%,#fffaf4)!important; box-shadow:0 4px 11px color-mix(in srgb,var(--pj-accent) 17%,transparent); }
+#private-journal .pj-theme-switcher button:active,
+#private-journal .pj-desk-switcher button:active { scale:.96; }
+#private-journal .pj-theme-switcher button:focus-visible,
+#private-journal .pj-desk-switcher button:focus-visible { outline:2px solid var(--pj-accent); outline-offset:2px; }
+.pj-theme-switcher button span,.pj-desk-switcher button span { display:none; }
+.pj-theme-switcher i { display:block; width:18px; height:18px; border-radius:50%; box-shadow:inset 0 0 0 1px rgba(255,255,255,.38),0 2px 6px rgba(71,47,43,.2); }
+.pj-desk-switcher i { display:block; width:24px; height:16px; border-radius:4px; outline:1px solid rgba(0,0,0,.1); box-shadow:inset 0 0 0 1px rgba(255,255,255,.16),0 2px 5px rgba(71,47,43,.18); }
 .pj-theme-switcher [data-theme-option="botanical-noir"] i { background:linear-gradient(135deg,#17241b,#712f39); }
 .pj-theme-switcher [data-theme-option="rococo-garden"] i { background:linear-gradient(135deg,#d9e2df,#ecc0b5); }
 .pj-theme-switcher [data-theme-option="indigo-reed"] i { background:linear-gradient(135deg,#102945,#e7ddc2); }
 .pj-theme-switcher [data-theme-option="italian-marble"] i { background:linear-gradient(135deg,#6f321a,#d6aa72,#50625a); }
 .pj-theme-switcher [data-theme-option="magnolia-swallow"] i { background:linear-gradient(135deg,#789092,#e7dbc0,#9b5435); }
+.pj-desk-switcher [data-desk-option="pearl-cream"] i { background:linear-gradient(135deg,#e7c5bd 0 32%,#e8dccb 32% 68%,#b7927d 68%); }
+.pj-desk-switcher [data-desk-option="forest-walnut"] i { background:repeating-linear-gradient(4deg,#24150d 0 3px,#4a2c18 3px 5px,#1a120d 5px 7px); }
+.pj-desk-switcher [data-desk-option="light-ash"] i { background:repeating-linear-gradient(3deg,#ead1aa 0 3px,#f4dfbd 3px 6px,#c9a779 6px 7px); }
+.pj-desk-switcher [data-desk-option="olive-warmwood"] i { background:linear-gradient(135deg,#3f4431 0 30%,#97502a 30% 76%,#d2a568 76%); }
+.pj-desk-switcher [data-desk-option="magnolia-inkstone"] i { background:linear-gradient(135deg,#b9cbc2 0 24%,#47291f 24% 73%,#e8dfca 73%); }
+#private-journal.book-open .pj-style-palette { visibility:hidden; opacity:0; pointer-events:none; transform:translateY(-6px); }
 
 #private-journal-launcher { position:fixed; right:18px; bottom:118px; z-index:3000; width:44px; height:44px; border:1px solid #d7bd92; border-radius:50%; color:#fff8e8; background:#713c46; box-shadow:0 8px 24px #0006; cursor:grab; font-size:22px; touch-action:none; user-select:none; }
 #private-journal-launcher:active { cursor:grabbing; }
@@ -597,14 +623,12 @@
   .pj-tabs button small { display:none; }
   .pj-tabs button.active { color:transparent; transform:translateX(0); }
   .pj-tabs button.active span { color:#fffaf0; }
-  #private-journal.book-open .pj-theme-switcher { visibility:hidden; opacity:0; }
-  .pj-theme-switcher { top:auto; right:auto; bottom:9px; left:50%; display:flex; max-width:calc(100vw - 18px); padding:6px; overflow:auto; border-radius:99px; transform:translateX(-50%); }
-  .pj-theme-switcher { scrollbar-width:none; }
-  .pj-theme-switcher::-webkit-scrollbar { display:none; }
-  .pj-theme-switcher::before { display:none; }
-  .pj-theme-switcher button { padding-right:5px; }
-  .pj-theme-switcher button span { display:none; }
-  .pj-theme-switcher i { width:20px; height:20px; }
+  .pj-style-palette { top:auto; right:auto; bottom:9px; left:50%; gap:5px; padding:7px 9px; transform:translateX(-50%); }
+  .pj-style-row { grid-template-columns:27px auto; gap:5px; }
+  .pj-style-label { font-size:8px; }
+  .pj-theme-switcher,.pj-desk-switcher { grid-template-columns:repeat(5,28px); gap:3px; }
+  #private-journal .pj-theme-switcher button,#private-journal .pj-desk-switcher button { width:28px; height:27px; }
+  #private-journal.book-open .pj-style-palette { transform:translateX(-50%) translateY(7px); }
   .pj-book nav,.pj-book footer { padding:13px 15px; }
   .pj-book footer { align-items:stretch; flex-direction:column; }
   .pj-footer-state,.pj-footer-actions { justify-content:space-between; }

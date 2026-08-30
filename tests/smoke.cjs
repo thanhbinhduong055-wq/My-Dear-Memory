@@ -46,16 +46,26 @@ vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'index.js' });
 
 assert.equal(vm.runInContext('Object.keys(THEMES).length', sandbox), 5);
+assert.equal(vm.runInContext('Object.keys(DESKS).length', sandbox), 5);
 assert.equal(vm.runInContext('DEFAULTS.theme', sandbox), 'botanical-noir');
+assert.equal(vm.runInContext('DEFAULTS.desk', sandbox), 'pearl-cream');
 assert.equal(vm.runInContext('DEFAULTS.generationApiMode', sandbox), 'main');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-marble', 'magnolia-swallow']) {
   assert.match(styleSource, new RegExp(`assets/themes/cutouts/${theme}\\.png`));
   assert.equal(fs.existsSync(require.resolve(`../assets/themes/cutouts/${theme}.png`)), true);
 }
+for (const desk of ['forest-walnut.png', 'light-ash.png', 'olive-warmwood.png', 'magnolia-inkstone.png']) {
+  assert.equal(fs.existsSync(require.resolve(`../assets/backgrounds/${desk}`)), true);
+}
 assert.match(styleSource, /--pj-spread-ratio/);
 assert.match(source, /class="pj-scene-close"/);
 assert.match(source, /class="pj-cover-art"/);
+assert.match(source, /class="pj-desk-art"/);
+assert.match(source, /class="pj-desk-switcher"/);
+assert.match(source, /data-desk-option/);
+assert.match(styleSource, /\.pj-style-palette/);
+assert.match(styleSource, /#private-journal\[data-desk="forest-walnut"\]/);
 assert.match(styleSource, /#private-journal \.pj-cover-art\s*\{/);
 assert.match(styleSource, /object-fit:fill!important/);
 assert.match(styleSource, /--pj-font-cover:/);
