@@ -34,6 +34,10 @@ const sandbox = {
   confirm: () => false,
   URL,
   Blob,
+  TextEncoder,
+  Uint8Array,
+  DataView,
+  ArrayBuffer,
   Math,
   Date,
 };
@@ -49,6 +53,9 @@ for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-
 }
 assert.match(styleSource, /--pj-spread-ratio/);
 assert.match(source, /class="pj-scene-close"/);
+assert.match(source, /class="pj-cover-art"/);
+assert.match(styleSource, /#private-journal \.pj-cover-art\s*\{/);
+assert.match(styleSource, /object-fit:fill!important/);
 assert.match(source, /aria-label="书签目录"/);
 assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
@@ -62,24 +69,16 @@ const fallbackPage = vm.runInContext(`parseJson('模型返回了普通文本，�
 assert.equal(fallbackPage.title, '情书');
 assert.match(fallbackPage.body, /普通文本/);
 
-const aliasedSong = vm.runInContext(`normalizePage({
-  title: '一页',
-  body: '正文',
-  song: { name: '夜曲', singer: '周杰伦', lyric: '为你弹奏肖邦的夜曲', translationZh: '为你轻轻奏响一支夜曲' }
+const strippedLegacyMedia = vm.runInContext(`normalizePage({
+  title: '一页', body: '正文', poem: { text: '旧诗句' }, song: { title: '旧歌曲', excerpt: '旧歌词' }
 })`, sandbox);
-assert.equal(aliasedSong.song.title, '夜曲');
-assert.equal(aliasedSong.song.artist, '周杰伦');
-assert.equal(aliasedSong.song.translation, '为你轻轻奏响一支夜曲');
+assert.equal(strippedLegacyMedia.poem, undefined);
+assert.equal(strippedLegacyMedia.song, undefined);
 
-const missingSongTitle = vm.runInContext(`normalizePage({ title: '一页', body: '正文', song: { excerpt: '一小段歌词' } })`, sandbox);
-assert.equal(missingSongTitle.song.title, '未提供歌曲');
-assert.equal(missingSongTitle.song.isMissingTitle, true);
-
-const taggedPage = vm.runInContext(`parseJson('<journal_page><title>雨夜</title><dateLabel>此刻</dateLabel><mood>担心</mood><body>我希望你平安回来。</body><poem><text>一行短诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>Moon River</title><artist>Audrey Hepburn</artist><excerpt>Two drifters</excerpt><translation>两个漂泊的人</translation><isParaphrase>false</isParaphrase></song><anchors><item>他受伤了</item></anchors><confidence>high</confidence></journal_page>', 'love_letter')`, sandbox);
+const taggedPage = vm.runInContext(`parseJson('<journal_page><title>雨夜</title><dateLabel>此刻</dateLabel><mood>担心</mood><body>我希望你平安回来。</body><anchors><item>他受伤了</item></anchors><confidence>high</confidence></journal_page>', 'love_letter')`, sandbox);
 assert.equal(taggedPage.title, '雨夜');
 assert.equal(taggedPage.body, '我希望你平安回来。');
-assert.equal(taggedPage.song.title, 'Moon River');
-assert.equal(taggedPage.song.translation, '两个漂泊的人');
+assert.equal(taggedPage.song, undefined);
 
 const leakedPayload = '{"title":"你别受伤","dateLabel":"此刻","mood":"担心","body":"姜藏：\\n\\n我写的是"晚饭想吃铜锅涮肉"，也是真的怕你疼。","poem":{"text":"一行诗","author":"原创","work":"无题","isOriginal":true},"song":{"title":"一路生花","artist":"温奕心","excerpt":"我希望许过的愿望一路生花","isParaphrase":false},"memoryAnchors":[],"confidence":"low"}';
 sandbox.leakedPayload = leakedPayload;
@@ -95,10 +94,10 @@ assert.match(repairedStoredPage.body, /铜锅涮肉/);
 const impressionPrompt = vm.runInContext(`buildPrompt('impression', { impressionFocus: 'custom', customRequest: '观察他的克制与温柔' })`, sandbox);
 assert.match(impressionPrompt, /叙述视角始终是 User/);
 assert.match(impressionPrompt, /观察他的克制与温柔/);
-assert.match(impressionPrompt, /song\.title 必须填写准确歌名/);
 assert.match(impressionPrompt, /必须写成“初印象”/);
 assert.match(impressionPrompt, /User Persona/);
-assert.match(impressionPrompt, /song\.translation/);
+assert.match(impressionPrompt, /不要附加诗句、歌词、歌曲推荐或配乐/);
+assert.doesNotMatch(impressionPrompt, /<poem>|<song>|lyricsMaxWords/);
 
 const dailyPrompt = vm.runInContext(`buildPrompt('daily_note')`, sandbox);
 assert.match(dailyPrompt, /User 与 Char 已经发生的日常相处/);
@@ -119,25 +118,21 @@ assert.equal(relationship.source, 'model');
 const batchPrompt = vm.runInContext(`buildBatchPrompt({ impressionFocus: 'personality' })`, sandbox);
 assert.match(batchPrompt, /禁止只写其中一个栏目/);
 assert.match(batchPrompt, /必须按顺序完整输出/);
-assert.match(batchPrompt, /本轮不会发送第二次请求补字段/);
 assert.match(batchPrompt, /情感浓度必须明显高于其他栏目/);
 assert.match(batchPrompt, /正文至少三分之二描写 User 的内心情感/);
 assert.match(batchPrompt, /必须写“初印象”/);
 assert.match(batchPrompt, /User Persona/);
-assert.match(batchPrompt, /translation 必须给出/);
-assert.equal((batchPrompt.match(/<round_accompaniment>/g) || []).length, 1);
-assert.equal((batchPrompt.match(/<song>/g) || []).length, 1);
+assert.match(batchPrompt, /不要附加诗句、歌词、歌曲推荐或配乐/);
+assert.equal((batchPrompt.match(/<round_accompaniment>/g) || []).length, 0);
+assert.equal((batchPrompt.match(/<song>/g) || []).length, 0);
 
-const taggedBatch = vm.runInContext(`parseBatch('<journal_batch><relationship><status>uncertain</status><reason>证据不足</reason><evidence><item>尚未确认</item></evidence></relationship><round_accompaniment><poem><text>一行诗</text><author>原创</author><work>无题</work><isOriginal>true</isOriginal></poem><song><title>夜曲</title><artist>周杰伦</artist><excerpt>一小段</excerpt><translation>一段中文译意</translation><isParaphrase>false</isParaphrase></song></round_accompaniment><page type="impression"><title>印象</title><body>他很克制。</body></page><page type="daily_note"><title>日常</title><body>我们一起吃饭。</body></page><page type="love_letter"><title>给你</title><body>我想你平安。</body></page><page type="romance_diary" save="false"></page></journal_batch>')`, sandbox);
+const taggedBatch = vm.runInContext(`parseBatch('<journal_batch><relationship><status>uncertain</status><reason>证据不足</reason><evidence><item>尚未确认</item></evidence></relationship><page type="impression"><title>印象</title><body>他很克制。</body></page><page type="daily_note"><title>日常</title><body>我们一起吃饭。</body></page><page type="love_letter"><title>给你</title><body>我想你平安。</body></page><page type="romance_diary" save="false"></page></journal_batch>')`, sandbox);
 assert.equal(taggedBatch.updates.length, 3);
 assert.deepEqual(Array.from(taggedBatch.updates, item => item.type), ['impression', 'daily_note', 'love_letter']);
-assert.equal(taggedBatch.accompaniment.song.title, '夜曲');
-assert.equal(taggedBatch.accompaniment.song.translation, '一段中文译意');
-assert.equal(taggedBatch.accompaniment.poem.text, '一行诗');
+assert.equal(taggedBatch.accompaniment, undefined);
 
 const batchResult = vm.runInContext(`parseBatch(JSON.stringify({
   relationship: { status: 'uncertain', reason: '证据不足', evidence: [] },
-  accompaniment: { poem: { text: '短诗', author: '原创' }, song: { title: '稻香', artist: '周杰伦', excerpt: '回家吧' } },
   updates: [
     { type: 'impression', shouldSave: true, page: { title: '印象', body: '他很安静。' } },
     { type: 'daily_note', shouldSave: true, page: { title: '日常', body: '我们聊了很久。' } },
@@ -147,12 +142,15 @@ const batchResult = vm.runInContext(`parseBatch(JSON.stringify({
 }))`, sandbox);
 assert.equal(batchResult.updates.length, 3);
 assert.equal(batchResult.relationship.status, 'uncertain');
-assert.equal(batchResult.accompaniment.song.title, '稻香');
+assert.equal(batchResult.accompaniment, undefined);
 
-const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression' }] })`, sandbox);
-assert.equal(legacyBook.version, 5);
+const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression', poem: { text: '旧诗' }, song: { title: '旧歌' }, hasRoundAccompaniment: true }] })`, sandbox);
+assert.equal(legacyBook.version, 7);
 assert.equal(legacyBook.pages[0].type, 'impression');
 assert.equal(legacyBook.pages[0].impressionStage, 'initial');
+assert.equal(legacyBook.pages[0].poem, undefined);
+assert.equal(legacyBook.pages[0].song, undefined);
+assert.equal(legacyBook.pages[0].hasRoundAccompaniment, undefined);
 
 const separatedPages = vm.runInContext(`pagesForType({ pages: [
   { type: 'impression', title: '印象一' },
@@ -164,22 +162,52 @@ assert.equal(separatedPages[0].title, '日记一');
 
 const foldedPageHtml = vm.runInContext(`renderPage({
   id: 'page-1', type: 'daily_note', title: '折叠标题', dateLabel: '此刻', mood: '安静',
-  body: '折叠正文', confidence: 'high', memoryAnchors: [],
-  hasRoundAccompaniment: true, poem: { text: '一行诗', author: '原创', work: '无题' },
-  song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Two drifters' }
+  body: '第一段。\\n\\n第二段。', confidence: 'high', memoryAnchors: []
 })`, sandbox);
 assert.match(foldedPageHtml, /^<details class="pj-page">/);
 assert.doesNotMatch(foldedPageHtml, /<details class="pj-page" open>/);
 assert.match(foldedPageHtml, /<summary>/);
 assert.doesNotMatch(foldedPageHtml, /confidence|记忆锚点|本轮诗句与配乐/);
-assert.doesNotMatch(foldedPageHtml, /Two drifters/);
-assert.doesNotMatch(foldedPageHtml, /一行诗/);
+assert.match(foldedPageHtml, /<div class="pj-body"><p>第一段。<\/p><p>第二段。<\/p><\/div>/);
 
 const initialImpressionHtml = vm.runInContext(`renderPage({
   id: 'impression-1', type: 'impression', impressionStage: 'initial', title: '第一次看见你',
   dateLabel: '最初', mood: '好奇', body: '我先记住了你的沉默。'
 })`, sandbox);
 assert.match(initialImpressionHtml, /初印象/);
+
+const quotePage = vm.runInContext(`createQuotePage({
+  text: '“下雨了，就向我这边走。”',
+  speaker: 'Character',
+  sourceMessageIndex: 7,
+  dateLabel: '雨夜'
+})`, sandbox);
+assert.equal(quotePage.type, 'quote_note');
+assert.equal(quotePage.body, '“下雨了，就向我这边走。”');
+assert.equal(quotePage.quoteSpeaker, 'Character');
+assert.equal(quotePage.sourceMessageIndex, 7);
+
+const quotePageHtml = vm.runInContext(`renderPage({
+  id: 'quote-1', type: 'quote_note', title: '下雨了，就向我这边走', dateLabel: '雨夜', mood: '想留下来的话',
+  body: '“下雨了，就向我这边走。”', quoteSpeaker: 'Character'
+})`, sandbox);
+assert.match(quotePageHtml, /pj-quote-page/);
+assert.match(quotePageHtml, /Character/);
+
+const wordParts = vm.runInContext(`buildWordDocumentParts({
+  userName: '姜藏', characterName: '陈砚', pages: [
+    { id: 'quote-1', type: 'quote_note', title: '雨夜对白', dateLabel: '雨夜', mood: '想留下来的话', body: '你 & 我 <一起>', quoteSpeaker: '陈砚', createdAt: '2025-01-18T00:00:00.000Z' },
+    { id: 'daily-1', type: 'daily_note', title: '旧数据迁移', dateLabel: '从前', mood: '安静', body: '只保留这一段正文。', poem: { text: '不应导出的旧诗句' }, song: { title: '不应导出的旧歌曲', excerpt: '不应导出的旧歌词' } }
+  ]
+})`, sandbox);
+assert.equal(typeof wordParts['[Content_Types].xml'], 'string');
+assert.match(wordParts['word/document.xml'], /姜藏 × 陈砚的私语手札/);
+assert.match(wordParts['word/document.xml'], /你 &amp; 我 &lt;一起&gt;/);
+assert.match(wordParts['word/document.xml'], /只保留这一段正文/);
+assert.doesNotMatch(wordParts['word/document.xml'], /不应导出的旧诗句|不应导出的旧歌曲|不应导出的旧歌词/);
+assert.match(wordParts['word/styles.xml'], /w:styleId="Quote"/);
+const wordZip = vm.runInContext(`createStoredZip(buildWordDocumentParts({ userName: '姜藏', characterName: '陈砚', pages: [] }))`, sandbox);
+assert.deepEqual(Array.from(wordZip.slice(0, 4)), [80, 75, 3, 4]);
 
 const fallbackId = vm.runInContext('createId()', sandbox);
 assert.match(fallbackId, /^[a-z0-9]+-[a-z0-9]+$/);
@@ -242,7 +270,6 @@ assert.equal(vm.runInContext(`observeStoryDay(datedTimelineBook, { signature: 'd
     batchApiCalls += 1;
     return JSON.stringify({
       relationship: { status: 'uncertain', reason: '证据不足', evidence: [] },
-      accompaniment: { poem: { text: '一行短诗', author: '原创' }, song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Wherever you are going' } },
       updates: [
         { type: 'impression', shouldSave: true, page: { title: '印象', body: '他的语气很轻。' } },
         { type: 'daily_note', shouldSave: true, page: { title: '日常', body: '我们聊到深夜。' } },
@@ -255,9 +282,7 @@ assert.equal(vm.runInContext(`observeStoryDay(datedTimelineBook, { signature: 'd
   await vm.runInContext(`generateBatch({ captureSignature: 'one-main-message' })`, sandbox);
   assert.equal(batchApiCalls, 1);
   assert.equal(vm.runInContext('currentBook.pages.length', sandbox), 3);
-  assert.equal(vm.runInContext(`currentBook.pages.filter(page => page.song?.title === 'Moon River').length`, sandbox), 1);
-  assert.equal(vm.runInContext(`currentBook.pages.find(page => page.type === 'daily_note').hasRoundAccompaniment`, sandbox), true);
-  assert.equal(vm.runInContext(`currentBook.pages.find(page => page.type === 'love_letter').song.title`, sandbox), '');
+  assert.equal(vm.runInContext(`currentBook.pages.some(page => 'song' in page || 'poem' in page || 'hasRoundAccompaniment' in page)`, sandbox), false);
   console.log('Private Journal smoke tests passed.');
 })().catch(error => {
   console.error(error);

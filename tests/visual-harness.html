@@ -7,14 +7,19 @@
   <link rel="stylesheet" href="../style.css">
   <style>
     html,body{width:100%;height:100%;margin:0;background:#28231f}
+    /* Simulate broad SillyTavern/theme rules that previously collapsed the cover layer. */
+    button>span{max-height:120px}
+    button img{height:auto;max-width:100%}
+    #chat{position:fixed;inset:0;padding:40px;color:#eee;background:#28231f;font:18px/1.8 sans-serif}
   </style>
 </head>
 <body>
+  <div id="chat"><div class="mes" mesid="1"><div class="name_text">陈砚</div><div class="mes_text">下雨了，就向我这边走。我会在灯下等你。</div></div></div>
   <button id="extensionsMenuButton" hidden></button>
   <div id="extensionsMenu" hidden></div>
   <script>
     const sampleBook = {
-      version: 5,
+      version: 7,
       chatId: 'visual-chat',
       characterId: 'chen-yan',
       userName: '姜藏',
@@ -29,13 +34,14 @@
       timeline: { currentDayKey: 'date:2025-01-18', currentDayLabel: '2025年1月18日', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
       pages: [
         {
+          id: 'quote-1', type: 'quote_note', title: '下雨了，就向我这边走', dateLabel: '雨夜',
+          mood: '想留下来的话', body: '“下雨了，就向我这边走。”', quoteSpeaker: '陈砚'
+        },
+        {
           id: 'daily-1', type: 'daily_note', title: '灯火落在你肩上', dateLabel: '冬夜',
           mood: '安静地心疼', confidence: 'high',
           body: '你把伞往我这边偏的时候，自己的右肩很快湿了一小片。回到家，我替你把围巾搭在椅背上，厨房里那锅汤正发出很轻的响声。我们没有说什么郑重的话，只是一起等水沸腾。可我忽然觉得，所谓相处大概就是这些被人记住的小事。',
-          memoryAnchors: ['雨夜共撑一把伞', '一起在厨房等汤沸腾'],
-          hasRoundAccompaniment: true,
-          poem: { text: '今夜偏知春气暖，\n虫声新透绿窗纱。', author: '刘方平', work: '月夜' },
-          song: { title: 'Moon River', artist: 'Audrey Hepburn', excerpt: 'Two drifters, off to see the world.', translation: '两个漂泊的人，去看看这个世界。' }
+          memoryAnchors: ['雨夜共撑一把伞', '一起在厨房等汤沸腾']
         },
         {
           id: 'impression-1', type: 'impression', title: '我看见的克制', dateLabel: '初冬',
@@ -69,7 +75,7 @@
       name2: '陈砚',
       chat: [
         { is_user: true, is_system: false, mes: '雨下得很大，你别淋湿。' },
-        { is_user: false, is_system: false, mes: '陈砚把伞朝她那边偏了偏。' }
+        { is_user: false, is_system: false, mes: '下雨了，就向我这边走。我会在灯下等你。' }
       ],
       onlineStatus: 'connected',
       eventTypes: {},

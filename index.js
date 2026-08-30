@@ -1,9 +1,9 @@
 const MODULE_ID = 'st_private_journal';
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
+const EXTENSION_SCRIPT_URL = document.currentScript?.src || '';
 
 const DEFAULTS = {
   language: 'zh-CN',
-  lyricsMaxWords: 10,
   followMainGeneration: true,
   theme: 'botanical-noir',
   launcherPosition: null,
@@ -14,6 +14,9 @@ let currentBook = null;
 let activeType = 'impression';
 let activeImpressionFocus = 'overall';
 let customImpressionRequest = '';
+let quoteDraft = '';
+let quoteSpeakerDraft = '';
+let pendingQuoteSelection = null;
 let bookOpen = false;
 let mainGenerationActive = false;
 let journalGenerationActive = false;
@@ -50,6 +53,12 @@ const PAGE_TYPES = {
     empty: '恋爱日记还没有落笔。',
     instruction: '以 User 的第一人称记录 User 与 Char 作为伴侣之后的恋爱日常。正文至少三分之二用于 User 的内心感受、依恋、安心、不安、占有欲、亲密需求或关系变化，事件只作为情绪的锚点。只能使用已发生或上下文明示的内容。',
   },
+  quote_note: {
+    label: '小纸条',
+    icon: '❝',
+    empty: '还没有收起想一直记得的对白。',
+    instruction: '这一栏只保存 User 亲手收录的对白，不调用模型生成。',
+  },
 };
 
 const IMPRESSION_FOCUSES = {
@@ -61,12 +70,28 @@ const IMPRESSION_FOCUSES = {
 };
 
 const THEMES = {
-  'botanical-noir': { label: '暮色蔷薇', shortLabel: '蔷薇' },
-  'rococo-garden': { label: '洛可可花园', shortLabel: '花园' },
-  'indigo-reed': { label: '蓝染芒影', shortLabel: '蓝染' },
-  'italian-marble': { label: '托斯卡纳纹理', shortLabel: '纹理' },
-  'magnolia-swallow': { label: '玉兰燕影', shortLabel: '玉兰' },
+  'botanical-noir': { label: '暮色蔷薇', shortLabel: '蔷薇', asset: './assets/themes/cutouts/botanical-noir.png' },
+  'rococo-garden': { label: '洛可可花园', shortLabel: '花园', asset: './assets/themes/cutouts/rococo-garden.png' },
+  'indigo-reed': { label: '蓝染芒影', shortLabel: '蓝染', asset: './assets/themes/cutouts/indigo-reed.png' },
+  'italian-marble': { label: '托斯卡纳纹理', shortLabel: '纹理', asset: './assets/themes/cutouts/italian-marble.png' },
+  'magnolia-swallow': { label: '玉兰燕影', shortLabel: '玉兰', asset: './assets/themes/cutouts/magnolia-swallow.png' },
 };
+
+function themeAssetUrl(themeKey) {
+  const asset = THEMES[themeKey]?.asset || THEMES[DEFAULTS.theme].asset;
+  let baseUrl = EXTENSION_SCRIPT_URL;
+  if (!baseUrl && document.styleSheets) {
+    for (const sheet of document.styleSheets) {
+      if (!sheet.href) continue;
+      try {
+        const ownsJournalStyles = [...(sheet.cssRules || [])].some(rule => String(rule.selectorText || '').includes('#private-journal'));
+        if (ownsJournalStyles) { baseUrl = sheet.href; break; }
+      } catch (error) { /* Cross-origin stylesheets cannot expose cssRules. */ }
+    }
+  }
+  if (!baseUrl) return asset;
+  try { return new URL(asset, baseUrl).href; } catch (error) { return asset; }
+}
 
 function ctx() {
   return SillyTavern.getContext();
@@ -101,7 +126,7 @@ function storageKey() {
 function blankBook() {
   const id = identity();
   return {
-    version: 5,
+    version: 7,
     ...id,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -119,14 +144,18 @@ async function loadBook() {
 }
 
 function migrateBook(book) {
-  book.version = 5;
+  book.version = 7;
   book.pages = Array.isArray(book.pages) ? book.pages : [];
   book.pages = book.pages.map(page => {
     if (page.type === 'first_impression') {
       page.type = 'impression';
       page.impressionStage = 'initial';
     }
-    return repairStoredPage(page);
+    const repaired = repairStoredPage(page);
+    delete repaired.poem;
+    delete repaired.song;
+    delete repaired.hasRoundAccompaniment;
+    return repaired;
   });
   const impressions = book.pages.filter(page => page.type === 'impression');
   if (impressions.length && !impressions.some(page => page.impressionStage === 'initial')) {
@@ -174,11 +203,9 @@ function buildPrompt(type, options = {}) {
     `视角铁律：第一人称“我”只能指 ${id.userName}，观察与情绪均属于 User；${id.characterName} 是被观察、被书写或被倾诉的对象。\n` +
     `本栏目要求：${typeInstruction}\n` +
     `User 声音：先从 User Persona 与 User 在当前聊天中的实际发言归纳其用词、句长、语气强弱、幽默感、克制程度、称呼习惯和情绪表达方式，再以同一套语言习惯写作。不得套用 Char 的口吻，不得使用与 User 人设冲突的华丽辞藻或网络腔；资料不足时采用自然、克制的第一人称。\n` +
-    `写作要求：使用 ${settings.language}；有具体细节和情感余韵，像 User 真的会写下的话，避免模板腔。\n` +
-    `诗歌：选择一段与本页情绪贴合的中外诗歌。优先公共领域作品；如果版权状态不确定，请创作原创短诗并明确标记“原创”。不要伪造作者或出处。\n` +
-    `歌曲：必须选择一首真实存在且与本页贴合的歌曲，song.title 必须填写准确歌名，song.artist 必须填写歌手或创作者，二者不可留空。歌词只摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或不超过20个中日韩字符；song.translation 必须给出对应的简短中文翻译，中文歌词则写自然的中文释义。若无法可靠确认原句，保留歌名和歌手，并把 excerpt 与 translation 写成意译，isParaphrase 设为 true。不要伪造歌名、歌手或歌词。\n\n` +
+    `写作要求：使用 ${settings.language}；有具体细节和情感余韵，像 User 真的会写下的话，避免模板腔。只写手札正文，不要附加诗句、歌词、歌曲推荐或配乐。\n\n` +
     `只输出下面的标签格式，不要 JSON、Markdown 或代码围栏。标签内可以直接写正常引号和换行：\n` +
-    `<journal_page><title>页标题</title><dateLabel>故事内日期或此刻</dateLabel><mood>User的心绪</mood><body>正文</body><poem><text>诗歌</text><author>作者或原创</author><work>作品名或无题</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手或创作者</artist><excerpt>极短摘抄或意译</excerpt><translation>对应的简短中文翻译或释义</translation><isParaphrase>false</isParaphrase></song><anchors><item>依据1</item><item>依据2</item></anchors><confidence>high|medium|low</confidence></journal_page>`;
+    `<journal_page><title>页标题</title><dateLabel>故事内日期或此刻</dateLabel><mood>User的心绪</mood><body>正文</body><anchors><item>依据1</item><item>依据2</item></anchors><confidence>high|medium|low</confidence></journal_page>`;
 }
 
 function parseJson(raw, type = activeType) {
@@ -251,27 +278,12 @@ function parseTaggedPage(block) {
   const pageBlock = extractTagRaw(block, 'journal_page') || String(block || '');
   const body = extractTag(pageBlock, 'body');
   if (!body) return null;
-  const poemBlock = extractTagRaw(pageBlock, 'poem');
-  const songBlock = extractTagRaw(pageBlock, 'song');
   const anchorsBlock = extractTagRaw(pageBlock, 'anchors');
   return normalizePage({
     title: extractTag(pageBlock, 'title') || '无题',
     dateLabel: extractTag(pageBlock, 'dateLabel') || '此刻',
     mood: extractTag(pageBlock, 'mood') || '未命名的心绪',
     body,
-    poem: {
-      text: extractTag(poemBlock, 'text'),
-      author: extractTag(poemBlock, 'author'),
-      work: extractTag(poemBlock, 'work'),
-      isOriginal: extractTag(poemBlock, 'isOriginal').toLowerCase() === 'true',
-    },
-    song: {
-      title: extractTag(songBlock, 'title'),
-      artist: extractTag(songBlock, 'artist'),
-      excerpt: extractTag(songBlock, 'excerpt'),
-      translation: extractTag(songBlock, 'translation'),
-      isParaphrase: extractTag(songBlock, 'isParaphrase').toLowerCase() === 'true',
-    },
     memoryAnchors: extractTagItems(anchorsBlock),
     confidence: extractTag(pageBlock, 'confidence') || 'low',
   });
@@ -292,29 +304,12 @@ function extractLooseField(text, field, nextFields = []) {
 function parseLooseJsonPage(text, type = activeType) {
   const body = extractLooseField(text, 'body', ['poem', 'song', 'memoryAnchors', 'confidence']);
   if (!body) return null;
-  const poemMatch = /["']poem["']\s*:\s*\{([\s\S]*?)\}\s*,\s*["']song["']\s*:/i.exec(text);
-  const songMatch = /["']song["']\s*:\s*\{([\s\S]*?)\}\s*,\s*["'](?:memoryAnchors|confidence)["']\s*:/i.exec(text);
-  const poemBlock = poemMatch?.[1] || '';
-  const songBlock = songMatch?.[1] || '';
   const meta = PAGE_TYPES[type] || PAGE_TYPES.daily_note;
   return normalizePage({
     title: extractLooseField(text, 'title', ['dateLabel', 'mood', 'perspective', 'body']) || meta.label,
     dateLabel: extractLooseField(text, 'dateLabel', ['mood', 'perspective', 'body']) || '此刻',
     mood: extractLooseField(text, 'mood', ['perspective', 'body']) || '未命名的心绪',
     body,
-    poem: {
-      text: extractLooseField(poemBlock, 'text', ['author', 'work', 'isOriginal']),
-      author: extractLooseField(poemBlock, 'author', ['work', 'isOriginal']),
-      work: extractLooseField(poemBlock, 'work', ['isOriginal']),
-      isOriginal: /["']isOriginal["']\s*:\s*true/i.test(poemBlock),
-    },
-    song: {
-      title: extractLooseField(songBlock, 'title', ['artist', 'excerpt', 'translation', 'isParaphrase']),
-      artist: extractLooseField(songBlock, 'artist', ['excerpt', 'translation', 'isParaphrase']),
-      excerpt: extractLooseField(songBlock, 'excerpt', ['translation', 'isParaphrase']),
-      translation: extractLooseField(songBlock, 'translation', ['isParaphrase']),
-      isParaphrase: /["']isParaphrase["']\s*:\s*true/i.test(songBlock),
-    },
     confidence: /["']confidence["']\s*:\s*["'](high|medium|low)["']/i.exec(text)?.[1] || 'low',
   });
 }
@@ -333,40 +328,15 @@ function repairStoredPage(page) {
 }
 
 function normalizePage(page) {
-  const rawSong = typeof page.song === 'string' ? { title: page.song } : (page.song || {});
-  const songTitle = rawSong.title || rawSong.name || rawSong.songTitle || rawSong['歌名'] || page.songTitle || '';
-  const songArtist = rawSong.artist || rawSong.singer || rawSong.author || rawSong['歌手'] || page.songArtist || '';
-  const songExcerpt = rawSong.excerpt || rawSong.lyric || rawSong.lyrics || rawSong['歌词摘抄'] || page.songExcerpt || '';
-  const songTranslation = rawSong.translation || rawSong.translationZh || rawSong['中文翻译'] || page.songTranslation || '';
-  const hasSongContent = Boolean(songTitle || songArtist || songExcerpt || songTranslation);
   return {
     title: String(page.title || '无题'),
     dateLabel: String(page.dateLabel || '此刻'),
     mood: String(page.mood || '未命名的心绪'),
     perspective: 'user',
     body: String(page.body || ''),
-    poem: {
-      text: String(page.poem?.text || ''),
-      author: String(page.poem?.author || ''),
-      work: String(page.poem?.work || ''),
-      isOriginal: Boolean(page.poem?.isOriginal),
-    },
-    song: {
-      title: String(songTitle || (hasSongContent ? '未提供歌曲' : '')),
-      artist: String(songArtist),
-      excerpt: String(songExcerpt),
-      translation: String(songTranslation),
-      isParaphrase: Boolean(rawSong.isParaphrase),
-      isMissingTitle: Boolean(hasSongContent && !songTitle),
-    },
     memoryAnchors: Array.isArray(page.memoryAnchors) ? page.memoryAnchors.map(String).slice(0, 8) : [],
     confidence: ['high', 'medium', 'low'].includes(page.confidence) ? page.confidence : 'low',
   };
-}
-
-function normalizeAccompaniment(value = {}) {
-  const normalized = normalizePage({ title: '本轮附页', body: '', poem: value.poem, song: value.song });
-  return { poem: normalized.poem, song: normalized.song };
 }
 
 function buildRelationshipPrompt() {
@@ -387,7 +357,6 @@ function buildBatchPrompt(options = {}) {
   const userConfirmedPartners = currentBook?.relationship?.status === 'partners' && currentBook?.relationship?.source === 'user';
   const initialImpression = isInitialImpression();
   const pageTemplate = (type, save = 'true') => `<page type="${type}" save="${save}"><title>标题</title><dateLabel>日期或此刻</dateLabel><mood>心绪</mood><body>按栏目要求完成的正文</body><anchors><item>依据</item></anchors><confidence>high|medium|low</confidence></page>`;
-  const accompanimentTemplate = `<round_accompaniment><poem><text>1至2行短诗</text><author>作者或原创</author><work>作品名</work><isOriginal>false</isOriginal></poem><song><title>准确歌名</title><artist>歌手</artist><excerpt>极短摘抄或意译</excerpt><translation>对应的简短中文翻译或释义</translation><isParaphrase>false</isParaphrase></song></round_accompaniment>`;
   return `故事时间刚刚跨入新的一天。请用这一次响应整理刚刚结束的完整故事日，并同步 ${id.userName} 与 ${id.characterName} 的整本私人手札；禁止只写其中一个栏目。若最新一条正文已经进入新一天，只把它当作跨日标记，不要把尚未发生完的新一天扩写进日记。所有内容都属于 User 的视角，第一人称“我”只能是 ${id.userName}，Char 是被观察、共同生活或被倾诉的对象。\n\n` +
     `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。避免四篇互相重复。\n` +
     `User 声音：先从 User Persona 和 User 的实际聊天发言归纳用词、句长、语气强弱、幽默感、克制程度、称呼习惯与表达禁区，四篇都必须像 User 本人会写出的文字；不得套用 Char 口吻或通用言情模板。资料不足时使用自然克制的第一人称。\n` +
@@ -395,10 +364,9 @@ function buildBatchPrompt(options = {}) {
     `相处日记：70至110字。User 记录两个人在本轮及近期已经发生的日常与感受，不写成情书。\n` +
     `情书：130至200字。User 直接写给 Char，“我”是 User、“你”是 Char，绝对不要反写。情感浓度必须明显高于其他栏目，写出具体的眷恋、心疼、渴望、恐惧或不舍；允许脆弱和坦白，但不堆砌空泛辞藻。\n` +
     `关系判定：只有已明确确认恋爱、情侣、伴侣或配偶关系才是 partners；暧昧、调情、单恋和角色卡倾向都不算。${userConfirmedPartners ? 'User 已手动确认双方是伴侣，relationship.status 必须保持 partners。' : ''}\n` +
-    `恋爱日记：120至180字。仅当 relationship.status 为 partners 时生成；否则 save 必须为 false。正文至少三分之二描写 User 的内心情感、依恋、亲密需求与关系变化，事件叙述最多占三分之一。\n` +
-    `整轮只生成一次共享诗词与歌曲，放进 round_accompaniment；四个 page 内禁止再写 poem 或 song。共享歌曲的 title 与 artist 不可留空；歌词摘抄不超过 ${settings.lyricsMaxWords} 个英文单词或20个中日韩字符，translation 必须给出对应的简短中文翻译，中文歌词则写中文释义。不确定歌词原句时保留准确歌名和歌手，excerpt 与 translation 改为意译并设置 isParaphrase=true。本轮不会发送第二次请求补字段。诗歌优先公共领域，出处不确定时写明确标注的原创短诗。\n\n` +
+    `恋爱日记：120至180字。仅当 relationship.status 为 partners 时生成；否则 save 必须为 false。正文至少三分之二描写 User 的内心情感、依恋、亲密需求与关系变化，事件叙述最多占三分之一。四个栏目都只写手札正文，不要附加诗句、歌词、歌曲推荐或配乐。\n\n` +
     `只输出下列标签协议，不要 JSON、Markdown 或代码围栏。标签内可以直接写引号和换行。必须按顺序完整输出 relationship、impression、daily_note、love_letter；不得写“同上”“使用相同标签”等省略语。只有伴侣关系成立时才填写 romance_diary：\n` +
-    `<journal_batch><relationship><status>partners|not_partners|uncertain</status><reason>简短说明</reason><evidence><item>依据</item></evidence></relationship>` + accompanimentTemplate +
+    `<journal_batch><relationship><status>partners|not_partners|uncertain</status><reason>简短说明</reason><evidence><item>依据</item></evidence></relationship>` +
     pageTemplate('impression') + pageTemplate('daily_note') + pageTemplate('love_letter') +
     `${pageTemplate('romance_diary', userConfirmedPartners ? 'true' : 'true或false')}</journal_batch>`;
 }
@@ -439,7 +407,7 @@ function parseBatch(raw) {
   const rawUpdates = Array.isArray(payload.updates)
     ? payload.updates
     : Object.entries(payload.updates || {}).map(([type, value]) => ({ type, ...(value || {}) }));
-  const allowedTypes = new Set(Object.keys(PAGE_TYPES));
+  const allowedTypes = new Set(['impression', 'daily_note', 'love_letter', 'romance_diary']);
   const seenTypes = new Set();
   const updates = rawUpdates
     .filter(item => {
@@ -448,11 +416,7 @@ function parseBatch(raw) {
       return true;
     })
     .map(item => ({ type: item.type, page: normalizePage(item.page) }));
-  const legacyCompanionPage = updates.find(item => item.page.poem?.text || item.page.song?.title)?.page;
-  const accompaniment = normalizeAccompaniment(
-    payload.round_accompaniment || payload.roundAccompaniment || payload.accompaniment || legacyCompanionPage || {},
-  );
-  return { relationship: normalizeRelationship(payload.relationship || {}), accompaniment, updates };
+  return { relationship: normalizeRelationship(payload.relationship || {}), updates };
 }
 
 function parseTaggedBatch(text) {
@@ -463,24 +427,6 @@ function parseTaggedBatch(text) {
     reason: extractTag(relationshipBlock, 'reason'),
     evidence: extractTagItems(extractTagRaw(relationshipBlock, 'evidence')),
   });
-  const accompanimentBlock = extractTagRaw(text, 'round_accompaniment') || extractTagRaw(text, 'accompaniment');
-  const accompanimentPoem = extractTagRaw(accompanimentBlock, 'poem');
-  const accompanimentSong = extractTagRaw(accompanimentBlock, 'song');
-  const accompaniment = normalizeAccompaniment({
-    poem: {
-      text: extractTag(accompanimentPoem, 'text'),
-      author: extractTag(accompanimentPoem, 'author'),
-      work: extractTag(accompanimentPoem, 'work'),
-      isOriginal: extractTag(accompanimentPoem, 'isOriginal').toLowerCase() === 'true',
-    },
-    song: {
-      title: extractTag(accompanimentSong, 'title'),
-      artist: extractTag(accompanimentSong, 'artist'),
-      excerpt: extractTag(accompanimentSong, 'excerpt'),
-      translation: extractTag(accompanimentSong, 'translation'),
-      isParaphrase: extractTag(accompanimentSong, 'isParaphrase').toLowerCase() === 'true',
-    },
-  });
   const source = String(text || '');
   const starts = [...source.matchAll(/<page\b([^>]*)>/gi)];
   const updates = [];
@@ -490,7 +436,7 @@ function parseTaggedBatch(text) {
     const attrs = match[1] || '';
     const type = /\btype\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
     const saveValue = /\bsave\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1]?.toLowerCase();
-    if (!PAGE_TYPES[type] || saveValue === 'false' || seenTypes.has(type)) continue;
+    if (!['impression', 'daily_note', 'love_letter', 'romance_diary'].includes(type) || saveValue === 'false' || seenTypes.has(type)) continue;
     const contentStart = match.index + match[0].length;
     const contentEnd = starts[index + 1]?.index ?? source.indexOf('</journal_batch>', contentStart);
     const rawBlock = source.slice(contentStart, contentEnd >= 0 ? contentEnd : source.length).replace(/<\/page>\s*$/i, '');
@@ -499,7 +445,7 @@ function parseTaggedBatch(text) {
     seenTypes.add(type);
     updates.push({ type, page });
   }
-  return { relationship, accompaniment, updates };
+  return { relationship, updates };
 }
 
 function isRomanceUnlocked() {
@@ -616,8 +562,9 @@ function setStatus(message) {
 function setGeneratingUi(generating) {
   const button = root?.querySelector('[data-action="generate"]');
   if (!button) return;
-  button.disabled = generating;
-  button.textContent = generating ? '正在拾取回忆…' : `生成${PAGE_TYPES[activeType]?.label || '这一页'}`;
+  const isQuote = activeType === 'quote_note';
+  button.disabled = generating || (isQuote && !quoteDraft.trim());
+  button.textContent = generating ? '正在拾取回忆…' : (isQuote ? '保存小纸条' : `生成${PAGE_TYPES[activeType]?.label || '这一页'}`);
 }
 
 async function callCurrentMainApi(prompt) {
@@ -785,9 +732,6 @@ async function generateBatch({ captureSignature = null } = {}) {
     const createdAt = new Date().toISOString();
     const initialImpression = isInitialImpression(targetBook);
     const roundId = createId();
-    const accompaniment = batch.accompaniment || normalizeAccompaniment();
-    const hasAccompaniment = Boolean(accompaniment.poem?.text || accompaniment.song?.title || accompaniment.song?.excerpt);
-    const accompanimentOwner = pages.find(item => item.type === 'daily_note') || pages[0];
     for (const item of pages) {
       const page = item.page;
       page.id = createId();
@@ -796,14 +740,6 @@ async function generateBatch({ captureSignature = null } = {}) {
       page.createdAt = createdAt;
       page.source = 'auto-batch';
       page.captureSignature = signature;
-      page.poem = { text: '', author: '', work: '', isOriginal: false };
-      page.song = { title: '', artist: '', excerpt: '', translation: '', isParaphrase: false, isMissingTitle: false };
-      page.hasRoundAccompaniment = false;
-      if (hasAccompaniment && item === accompanimentOwner) {
-        page.poem = accompaniment.poem;
-        page.song = accompaniment.song;
-        page.hasRoundAccompaniment = true;
-      }
       if (item.type === 'impression') {
         page.impressionStage = initialImpression ? 'initial' : 'evolving';
         page.impressionFocus = focusKey;
@@ -888,12 +824,300 @@ function exportBook() {
   URL.revokeObjectURL(url);
 }
 
+function createQuotePage({ text, speaker, sourceMessageIndex = null, dateLabel = '', source = 'manual-quote' } = {}) {
+  const body = String(text || '').trim().slice(0, 1500);
+  if (!body) throw new Error('请先写下或选中想收藏的对白');
+  const plainTitle = body.replace(/[\r\n]+/g, ' ').replace(/^[“”「」『』"']+|[“”「」『』"']+$/g, '').trim();
+  return {
+    id: createId(),
+    type: 'quote_note',
+    title: `${plainTitle.slice(0, 18) || '未命名对白'}${plainTitle.length > 18 ? '…' : ''}`,
+    dateLabel: String(dateLabel || currentBook?.timeline?.currentDayLabel || '此刻'),
+    mood: '想留下来的话',
+    perspective: 'user',
+    body,
+    quoteSpeaker: String(speaker || identity().characterName || 'Char').trim(),
+    sourceMessageIndex: sourceMessageIndex !== null && sourceMessageIndex !== '' && Number.isFinite(Number(sourceMessageIndex)) ? Number(sourceMessageIndex) : null,
+    source,
+    createdAt: new Date().toISOString(),
+    memoryAnchors: [],
+    confidence: 'high',
+  };
+}
+
+async function saveQuoteNote(input = {}) {
+  try {
+    if (!currentBook) throw new Error('手札还在加载，请稍后再收录');
+    const page = createQuotePage({
+      text: input.text ?? quoteDraft,
+      speaker: input.speaker ?? quoteSpeakerDraft,
+      sourceMessageIndex: input.sourceMessageIndex,
+      dateLabel: input.dateLabel,
+      source: input.source || 'manual-quote',
+    });
+    currentBook.pages.unshift(page);
+    await saveBook();
+    quoteDraft = '';
+    quoteSpeakerDraft = '';
+    pendingQuoteSelection = null;
+    hideQuoteCapture();
+    if (root?.classList.contains('open')) render();
+    setStatus('已收进小纸条');
+    toastr.success('这句话已经收好了。', '私语手札');
+    return page;
+  } catch (error) {
+    toastr.warning(error?.message || String(error), '私语手札');
+    return null;
+  }
+}
+
+function selectionElement(selection) {
+  const node = selection?.anchorNode || selection?.focusNode;
+  return node?.nodeType === 1 ? node : node?.parentElement;
+}
+
+function readChatSelection() {
+  const selection = window.getSelection?.();
+  const text = String(selection?.toString() || '').trim();
+  if (!selection || selection.isCollapsed || !text || text.length > 1500) return null;
+  const element = selectionElement(selection);
+  if (!element || root?.contains(element)) return null;
+  const messageElement = element.closest?.('.mes, [mesid], [data-message-id]');
+  if (!messageElement) return null;
+  const rawIndex = messageElement.getAttribute?.('mesid') ?? messageElement.dataset?.messageId;
+  const sourceMessageIndex = /^\d+$/.test(String(rawIndex ?? '')) ? Number(rawIndex) : null;
+  const message = sourceMessageIndex === null ? null : ctx().chat?.[sourceMessageIndex];
+  const id = identity();
+  const domSpeaker = messageElement.querySelector?.('.name_text, .ch_name, [data-name]')?.textContent?.trim();
+  const speaker = message ? (message.is_user ? id.userName : id.characterName) : (domSpeaker || id.characterName);
+  let rect;
+  try { rect = selection.getRangeAt(0).getBoundingClientRect(); } catch (error) { rect = null; }
+  return { text, speaker, sourceMessageIndex, rect };
+}
+
+function hideQuoteCapture() {
+  const capture = document.querySelector?.('#private-journal-quote-capture');
+  if (capture) capture.hidden = true;
+}
+
+function positionQuoteCapture(selectionInfo) {
+  const capture = document.querySelector?.('#private-journal-quote-capture');
+  if (!capture || !selectionInfo?.rect) return;
+  const rect = selectionInfo.rect;
+  capture.hidden = false;
+  const left = Math.min(Math.max(12, rect.left + rect.width / 2), window.innerWidth - 92);
+  const top = Math.min(Math.max(12, rect.bottom + 9), window.innerHeight - 52);
+  capture.style.left = `${left}px`;
+  capture.style.top = `${top}px`;
+}
+
+function installQuoteCapture() {
+  if (document.querySelector('#private-journal-quote-capture')) return;
+  const capture = document.createElement('button');
+  capture.id = 'private-journal-quote-capture';
+  capture.type = 'button';
+  capture.hidden = true;
+  capture.textContent = '收进小纸条';
+  capture.setAttribute('aria-label', '把选中的对白收进小纸条');
+  capture.addEventListener('pointerdown', event => event.preventDefault());
+  capture.addEventListener('click', async event => {
+    event.preventDefault();
+    const selected = pendingQuoteSelection;
+    if (selected) await saveQuoteNote({ ...selected, source: 'chat-selection' });
+  });
+  document.body.append(capture);
+  document.addEventListener('pointerup', event => {
+    if (capture.contains(event.target)) return;
+    setTimeout(() => {
+      const selected = readChatSelection();
+      pendingQuoteSelection = selected;
+      if (selected) positionQuoteCapture(selected);
+      else hideQuoteCapture();
+    }, 0);
+  });
+  document.addEventListener('selectionchange', () => {
+    if (!window.getSelection?.()?.toString().trim()) {
+      pendingQuoteSelection = null;
+      hideQuoteCapture();
+    }
+  });
+}
+
+function xmlEscape(value = '') {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+  }[character]));
+}
+
+function wordParagraph(text, style = 'Normal', { pageBreakBefore = false, align = '' } = {}) {
+  const paragraphProperties = [
+    style ? `<w:pStyle w:val="${xmlEscape(style)}"/>` : '',
+    pageBreakBefore ? '<w:pageBreakBefore/>' : '',
+    align ? `<w:jc w:val="${align}"/>` : '',
+  ].join('');
+  return `<w:p><w:pPr>${paragraphProperties}</w:pPr><w:r><w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+}
+
+function wordBodyParagraphs(text, style = 'Normal') {
+  return String(text || '').split(/\r?\n/).map(line => wordParagraph(line || ' ', style)).join('');
+}
+
+function buildWordDocumentParts(book = currentBook) {
+  const safeBook = book || { pages: [] };
+  const userName = String(safeBook.userName || identity().userName);
+  const characterName = String(safeBook.characterName || identity().characterName);
+  const pages = Array.isArray(safeBook.pages) ? safeBook.pages : [];
+  const exportedAt = new Date().toLocaleString('zh-CN', { hour12: false });
+  const sections = [];
+  for (const [type, meta] of Object.entries(PAGE_TYPES)) {
+    const entries = pagesForType({ pages }, type).slice().reverse();
+    if (!entries.length) continue;
+    sections.push(wordParagraph(meta.label, 'Heading1'));
+    for (const page of entries) {
+      sections.push(wordParagraph(page.title || meta.label, 'Heading2'));
+      if (type === 'quote_note') {
+        sections.push(wordBodyParagraphs(page.body, 'Quote'));
+        sections.push(wordParagraph(`${page.quoteSpeaker || characterName}  ·  ${page.dateLabel || '此刻'}`, 'Meta'));
+        continue;
+      }
+      sections.push(wordParagraph(`${page.dateLabel || '此刻'}  ·  ${page.mood || '未命名的心绪'}`, 'Meta'));
+      sections.push(wordBodyParagraphs(page.body));
+    }
+  }
+  if (!sections.length) sections.push(wordParagraph('还没有写下任何一页。'));
+
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${wordParagraph(`${userName} × ${characterName}的私语手札`, 'Title')}${wordParagraph(`PRIVATE JOURNAL  ·  导出于 ${exportedAt}`, 'Meta', { align: 'center' })}${sections.join('')}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="宋体"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="342821"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="320" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:after="160" w:line="320" w:lineRule="auto"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="160"/></w:pPr><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:eastAsia="方正小标宋简体"/><w:b/><w:color w:val="713C46"/><w:sz w:val="60"/><w:szCs w:val="60"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="360" w:after="200"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:color w:val="713C46"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:color w:val="5A3F43"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:ind w:left="720" w:right="720"/><w:spacing w:before="80" w:after="160" w:line="320" w:lineRule="auto"/><w:pBdr><w:left w:val="single" w:sz="14" w:space="12" w:color="B98B88"/></w:pBdr></w:pPr><w:rPr><w:color w:val="584548"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Meta"><w:name w:val="Meta"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:before="0" w:after="160" w:line="280" w:lineRule="auto"/></w:pPr><w:rPr><w:color w:val="887365"/><w:sz w:val="19"/><w:szCs w:val="19"/></w:rPr></w:style></w:styles>`;
+  return {
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`,
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`,
+    'word/document.xml': documentXml,
+    'word/styles.xml': stylesXml,
+    'word/_rels/document.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    'docProps/core.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEscape(`${userName} × ${characterName}的私语手札`)}</dc:title><dc:creator>私语手札</dc:creator><cp:lastModifiedBy>私语手札</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:modified></cp:coreProperties>`,
+    'docProps/app.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>私语手札</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>1.0</AppVersion></Properties>`,
+  };
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function concatBytes(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
+  return result;
+}
+
+function zipHeader(size) {
+  const bytes = new Uint8Array(size);
+  const view = new DataView(bytes.buffer);
+  return { bytes, view };
+}
+
+function createStoredZip(files) {
+  const encoder = new TextEncoder();
+  const localChunks = [];
+  const centralChunks = [];
+  let localOffset = 0;
+  const now = new Date();
+  const dosTime = ((now.getHours() & 31) << 11) | ((now.getMinutes() & 63) << 5) | ((Math.floor(now.getSeconds() / 2)) & 31);
+  const dosDate = (((now.getFullYear() - 1980) & 127) << 9) | (((now.getMonth() + 1) & 15) << 5) | (now.getDate() & 31);
+  for (const [name, content] of Object.entries(files)) {
+    const nameBytes = encoder.encode(name);
+    const data = content instanceof Uint8Array ? content : encoder.encode(String(content));
+    const checksum = crc32(data);
+    const local = zipHeader(30);
+    local.view.setUint32(0, 0x04034b50, true);
+    local.view.setUint16(4, 20, true);
+    local.view.setUint16(6, 0x0800, true);
+    local.view.setUint16(8, 0, true);
+    local.view.setUint16(10, dosTime, true);
+    local.view.setUint16(12, dosDate, true);
+    local.view.setUint32(14, checksum, true);
+    local.view.setUint32(18, data.length, true);
+    local.view.setUint32(22, data.length, true);
+    local.view.setUint16(26, nameBytes.length, true);
+    local.view.setUint16(28, 0, true);
+    localChunks.push(local.bytes, nameBytes, data);
+
+    const central = zipHeader(46);
+    central.view.setUint32(0, 0x02014b50, true);
+    central.view.setUint16(4, 20, true);
+    central.view.setUint16(6, 20, true);
+    central.view.setUint16(8, 0x0800, true);
+    central.view.setUint16(10, 0, true);
+    central.view.setUint16(12, dosTime, true);
+    central.view.setUint16(14, dosDate, true);
+    central.view.setUint32(16, checksum, true);
+    central.view.setUint32(20, data.length, true);
+    central.view.setUint32(24, data.length, true);
+    central.view.setUint16(28, nameBytes.length, true);
+    central.view.setUint16(30, 0, true);
+    central.view.setUint16(32, 0, true);
+    central.view.setUint16(34, 0, true);
+    central.view.setUint16(36, 0, true);
+    central.view.setUint32(38, 0, true);
+    central.view.setUint32(42, localOffset, true);
+    centralChunks.push(central.bytes, nameBytes);
+    localOffset += local.bytes.length + nameBytes.length + data.length;
+  }
+  const centralDirectory = concatBytes(centralChunks);
+  const end = zipHeader(22);
+  end.view.setUint32(0, 0x06054b50, true);
+  end.view.setUint16(4, 0, true);
+  end.view.setUint16(6, 0, true);
+  end.view.setUint16(8, Object.keys(files).length, true);
+  end.view.setUint16(10, Object.keys(files).length, true);
+  end.view.setUint32(12, centralDirectory.length, true);
+  end.view.setUint32(16, localOffset, true);
+  end.view.setUint16(20, 0, true);
+  return concatBytes([...localChunks, centralDirectory, end.bytes]);
+}
+
+function exportWordDocument() {
+  const bytes = createStoredZip(buildWordDocumentParts(currentBook));
+  const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  const safeCharacterName = String(currentBook.characterName || '手札').replace(/[\\/:*?"<>|]/g, '-').slice(0, 48);
+  anchor.download = `private-journal-${safeCharacterName}-${new Date().toISOString().slice(0, 10)}.docx`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function renderProse(text, className = 'pj-body') {
+  const paragraphs = String(text || '')
+    .trim()
+    .split(/\r?\n\s*\r?\n/)
+    .map(paragraph => paragraph.trim())
+    .filter(Boolean);
+  const content = (paragraphs.length ? paragraphs : [''])
+    .map(paragraph => `<p>${escapeHtml(paragraph).replace(/\r?\n/g, '<br>')}</p>`)
+    .join('');
+  return `<div class="${className}">${content}</div>`;
+}
+
 function renderPage(page) {
   const type = PAGE_TYPES[page.type] || PAGE_TYPES.daily_note;
   const pageLabel = page.type === 'impression' && page.impressionStage === 'initial' ? '初印象' : type.label;
+  if (page.type === 'quote_note') {
+    return `<details class="pj-page pj-quote-page">
+      <summary><span class="pj-summary-copy"><span class="pj-kicker">${type.icon} ${escapeHtml(pageLabel)}</span><span class="pj-page-title">${escapeHtml(page.title)}</span><span class="pj-meta">${escapeHtml(page.dateLabel || '此刻')}</span></span><button class="pj-delete" data-delete="${escapeHtml(page.id)}" title="删除" aria-label="删除本页">×</button></summary>
+      <div class="pj-page-content">${renderProse(page.body, 'pj-quote-body')}<div class="pj-quote-source">— ${escapeHtml(page.quoteSpeaker || identity().characterName)}</div></div>
+    </details>`;
+  }
   return `<details class="pj-page">
     <summary><span class="pj-summary-copy"><span class="pj-kicker">${type.icon} ${escapeHtml(pageLabel)}</span><span class="pj-page-title">${escapeHtml(page.title)}</span><span class="pj-meta">${escapeHtml(page.dateLabel)} · ${escapeHtml(page.mood)}</span></span><button class="pj-delete" data-delete="${escapeHtml(page.id)}" title="删除" aria-label="删除本页">×</button></summary>
-    <div class="pj-page-content"><div class="pj-body">${escapeHtml(page.body).replace(/\n/g, '<br>')}</div></div>
+    <div class="pj-page-content">${renderProse(page.body)}</div>
   </details>`;
 }
 
@@ -911,13 +1135,6 @@ function pagesForType(book, type) {
   return pages.filter(page => page.type === type || (type === 'impression' && page.type === 'first_impression'));
 }
 
-function latestAccessoryPage() {
-  const pages = Array.isArray(currentBook?.pages) ? currentBook.pages : [];
-  return pages.find(page => page.hasRoundAccompaniment && (page.poem?.text || page.song?.title || page.song?.excerpt))
-    || pages.find(page => page.poem?.text || page.song?.title || page.song?.excerpt)
-    || null;
-}
-
 function renderAccessories() {
   if (!root) return;
   const id = identity();
@@ -926,6 +1143,12 @@ function renderAccessories() {
   settings.theme = themeKey;
   root.dataset.theme = themeKey;
   root.classList.toggle('book-open', bookOpen);
+
+  const coverArt = root.querySelector('.pj-cover-art');
+  if (coverArt) {
+    const nextSource = themeAssetUrl(themeKey);
+    if (coverArt.getAttribute('src') !== nextSource) coverArt.setAttribute('src', nextSource);
+  }
 
   const coverUser = root.querySelector('.pj-cover-user');
   const coverCharacter = root.querySelector('.pj-cover-character');
@@ -940,28 +1163,6 @@ function renderAccessories() {
       `<button class="${key === themeKey ? 'active' : ''}" data-theme-option="${key}" title="${escapeHtml(theme.label)}"><i></i><span>${escapeHtml(theme.shortLabel)}</span></button>`).join('');
   }
 
-  const accessory = latestAccessoryPage();
-  const poemNote = root.querySelector('.pj-poem-note');
-  const musicPlayer = root.querySelector('.pj-ipad');
-  if (poemNote) {
-    const poem = accessory?.poem;
-    poemNote.hidden = !poem?.text;
-    if (poem?.text) {
-      poemNote.querySelector('.pj-note-text').innerHTML = escapeHtml(poem.text).replace(/\n/g, '<br>');
-      poemNote.querySelector('.pj-note-source').textContent = `— ${poem.author || '佚名'}${poem.work ? `《${poem.work}》` : ''}`;
-    }
-  }
-  if (musicPlayer) {
-    const song = accessory?.song;
-    musicPlayer.hidden = !song?.title;
-    if (song?.title) {
-      musicPlayer.querySelector('.pj-music-title').textContent = song.title;
-      musicPlayer.querySelector('.pj-music-artist').textContent = song.artist || '未知歌手';
-      musicPlayer.querySelector('.pj-music-lyric').textContent = song.excerpt || '♪';
-      musicPlayer.querySelector('.pj-music-translation').textContent = song.translation || (song.isParaphrase ? '本段为中文意译' : '暂无中文翻译');
-      musicPlayer.querySelector('.pj-record-label').textContent = song.title.slice(0, 1) || '♪';
-    }
-  }
 }
 
 function renderControls() {
@@ -983,6 +1184,10 @@ function renderControls() {
     controls.innerHTML = `<div class="pj-relationship ${unlocked ? 'unlocked' : 'locked'}"><div><span class="pj-lock-mark">${unlocked ? '♡' : '♢'}</span><strong>${relationshipLabel(relationship.status)}</strong><p>${escapeHtml(relationship.reason || '跟随正文时会在同一次批量请求里判定关系；也可以在这里单独判定。')}</p>${evidence}</div><div class="pj-relationship-actions"><button class="pj-secondary" data-action="check-relationship" ${relationshipCheckActive ? 'disabled' : ''}>${relationshipCheckActive ? '判定中…' : relationship.status === 'unchecked' ? '单独判定 · 1次API' : '重新判定 · 1次API'}</button>${unlocked ? '<button class="pj-text-button" data-action="reset-relationship">重新锁定</button>' : '<button class="pj-text-button" data-action="confirm-relationship">由我确认已是伴侣</button>'}</div></div>`;
     return;
   }
+  if (activeType === 'quote_note') {
+    controls.innerHTML = `<div class="pj-quote-editor"><div class="pj-quote-editor-copy"><strong>收下一句舍不得忘记的话</strong><span>可在正文中选中对白，点击浮出的“收进小纸条”；也可以在这里手动粘贴。保存不会调用 API。</span></div><textarea class="pj-quote-input" data-quote-input maxlength="1500" placeholder="把想珍藏的对白放在这里…">${escapeHtml(quoteDraft)}</textarea><label class="pj-quote-speaker"><span>说话的人</span><input data-quote-speaker value="${escapeHtml(quoteSpeakerDraft)}" placeholder="${escapeHtml(identity().characterName)}"></label></div>`;
+    return;
+  }
   controls.innerHTML = '';
   controls.hidden = true;
 }
@@ -999,7 +1204,7 @@ function render() {
   const visiblePages = pagesForType(currentBook, activeType);
   root.querySelector('.pj-pages').innerHTML = visiblePages.length
     ? visiblePages.map(renderPage).join('')
-    : `<div class="pj-empty">${escapeHtml(PAGE_TYPES[activeType]?.empty || '纸页还是空白。')}<br><small>${activeType === 'romance_diary' && !isRomanceUnlocked() ? '先确认关系，再记录只属于恋人的篇章。' : '生成后会独立保存于当前栏目。'}</small></div>`;
+    : `<div class="pj-empty">${escapeHtml(PAGE_TYPES[activeType]?.empty || '纸页还是空白。')}<br><small>${activeType === 'romance_diary' && !isRomanceUnlocked() ? '先确认关系，再记录只属于恋人的篇章。' : activeType === 'quote_note' ? '在正文里选中对白即可收藏，不会消耗 API。' : '生成后会独立保存于当前栏目。'}</small></div>`;
   const follow = root.querySelector('[data-setting="followMainGeneration"]');
   if (follow) follow.checked = Boolean(getSettings().followMainGeneration);
   setGeneratingUi(journalGenerationActive);
@@ -1045,11 +1250,15 @@ function bind() {
       bookOpen = false;
       renderAccessories();
     }
-    if (action === 'generate') await generatePage({ type: activeType, source: 'manual' });
+    if (action === 'generate') {
+      if (activeType === 'quote_note') await saveQuoteNote();
+      else await generatePage({ type: activeType, source: 'manual' });
+    }
     if (action === 'check-relationship') await checkRelationship();
     if (action === 'confirm-relationship') await confirmRelationshipManually();
     if (action === 'reset-relationship') await resetRelationship();
     if (action === 'export') exportBook();
+    if (action === 'export-word') exportWordDocument();
     if (deleteId) {
       event.preventDefault();
       event.stopPropagation();
@@ -1058,6 +1267,11 @@ function bind() {
   });
   root.addEventListener('input', event => {
     if (event.target.matches('[data-impression-request]')) customImpressionRequest = event.target.value;
+    if (event.target.matches('[data-quote-input]')) {
+      quoteDraft = event.target.value;
+      setGeneratingUi(false);
+    }
+    if (event.target.matches('[data-quote-speaker]')) quoteSpeakerDraft = event.target.value;
   });
   root.addEventListener('change', event => {
     if (event.target.matches('[data-setting="followMainGeneration"]')) {
@@ -1153,27 +1367,27 @@ async function initialize() {
   getSettings();
   root = document.createElement('section');
   root.id = 'private-journal';
+  root.lang = getSettings().language || 'zh-CN';
   root.innerHTML = `<div class="pj-backdrop" data-action="close"></div><div class="pj-scene">
     <button class="pj-scene-close" data-action="close" aria-label="关闭私语手札" title="关闭">×</button>
-    <aside class="pj-poem-note" hidden aria-label="本轮诗句"><span class="pj-note-tape"></span><div class="pj-note-mark">❝</div><div class="pj-note-text"></div><div class="pj-note-source"></div></aside>
     <div class="pj-book-stage">
       <button class="pj-cover" data-action="toggle-book" aria-label="翻开或合上手札">
-        <span class="pj-cover-face pj-cover-front"><span class="pj-cover-shade"></span><span class="pj-cover-names"><span class="pj-cover-user"></span><i>×</i><span class="pj-cover-character"></span></span><span class="pj-cover-hint">轻触封面 · 翻开手札</span></span>
+        <span class="pj-cover-face pj-cover-front"><img class="pj-cover-art" src="${escapeHtml(themeAssetUrl(getSettings().theme))}" alt="" draggable="false"><span class="pj-cover-shade"></span><span class="pj-cover-names"><span class="pj-cover-user"></span><i>×</i><span class="pj-cover-character"></span></span><span class="pj-cover-hint">轻触封面 · 翻开手札</span></span>
         <span class="pj-cover-face pj-cover-back"></span>
       </button>
       <div class="pj-book">
         <button class="pj-bookmark" data-action="toggle-book" aria-label="合上手札" title="合上手札"><span class="pj-bookmark-label">印象</span><i></i></button>
         <div class="pj-page-turner" aria-hidden="true"></div>
-        <nav><div><span class="pj-nav-kicker">PRIVATE NOTES</span><h1 class="pj-title"></h1></div><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
+        <nav><h1 class="pj-title"></h1><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
         <div class="pj-tabs" role="tablist" aria-label="书签目录"></div><div class="pj-controls"></div><main class="pj-pages"></main>
-        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">导出</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
+        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
       </div>
     </div>
-    <aside class="pj-ipad" hidden aria-label="本轮音乐歌词"><div class="pj-ipad-camera"></div><div class="pj-ipad-screen"><div class="pj-music-app"><span class="pj-cloud-dot">♫</span><span>网易云音乐</span><b>•••</b></div><div class="pj-record"><div class="pj-record-label">♪</div></div><div class="pj-now-playing">NOW PLAYING</div><h3 class="pj-music-title"></h3><p class="pj-music-artist"></p><q class="pj-music-lyric"></q><p class="pj-music-translation"></p><div class="pj-progress"><i></i></div><div class="pj-player-controls"><span>‹</span><b>Ⅱ</b><span>›</span></div><div class="pj-ipad-home"></div></div></aside>
     <div class="pj-theme-switcher" role="group" aria-label="选择手札主题"></div>
   </div>`;
   document.body.append(root);
   bind();
+  installQuoteCapture();
 
   const launcher = document.createElement('button');
   launcher.id = 'private-journal-launcher';
