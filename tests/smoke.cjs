@@ -162,7 +162,7 @@ assert.equal(batchResult.relationship.status, 'uncertain');
 assert.equal(batchResult.accompaniment, undefined);
 
 const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression', poem: { text: '旧诗' }, song: { title: '旧歌' }, hasRoundAccompaniment: true }] })`, sandbox);
-assert.equal(legacyBook.version, 7);
+assert.equal(legacyBook.version, 8);
 assert.equal(legacyBook.pages[0].type, 'impression');
 assert.equal(legacyBook.pages[0].impressionStage, 'initial');
 assert.equal(legacyBook.pages[0].poem, undefined);
@@ -350,6 +350,90 @@ assert.equal(vm.runInContext(`observeStoryDay(datedTimelineBook, { signature: 'd
   assert.equal(batchApiCalls, 1);
   assert.equal(vm.runInContext('currentBook.pages.length', sandbox), 3);
   assert.equal(vm.runInContext(`currentBook.pages.some(page => 'song' in page || 'poem' in page || 'hasRoundAccompaniment' in page)`, sandbox), false);
+
+  const keyA = 'st_private_journal:book:chenyan.png:chat-a';
+  const keyB = 'st_private_journal:book:chenyan.png:chat-b';
+  const storedBooks = new Map([
+    [keyA, { ...JSON.parse(JSON.stringify(vm.runInContext('blankBook()', sandbox))), chatId: 'chat-a', pages: [{ id: 'a-impression', type: 'impression', title: 'A的印象', body: 'A的内容' }] }],
+    [keyB, { ...JSON.parse(JSON.stringify(vm.runInContext('blankBook()', sandbox))), chatId: 'chat-b', pages: [{ id: 'b-daily', type: 'daily_note', title: 'B的日记', body: 'B的内容' }] }],
+  ]);
+  let releaseChatA;
+  const chatAGate = new Promise(resolve => { releaseChatA = resolve; });
+  sandbox.SillyTavern.libs.localforage = {
+    getItem: async key => {
+      if (key === keyA) await chatAGate;
+      return storedBooks.has(key) ? JSON.parse(JSON.stringify(storedBooks.get(key))) : null;
+    },
+    setItem: async (key, value) => {
+      storedBooks.set(key, JSON.parse(JSON.stringify(value)));
+      return value;
+    },
+  };
+  contextValue.chatId = 'chat-a';
+  const staleLoad = vm.runInContext('loadBook()', sandbox);
+  contextValue.chatId = 'chat-b';
+  releaseChatA();
+  await staleLoad;
+  assert.equal(storedBooks.get(keyB).chatId, 'chat-b', '旧聊天的异步加载不能覆盖新聊天的手札');
+  assert.equal(storedBooks.get(keyB).pages[0].id, 'b-daily', '新聊天已经保存的日记必须保留');
+
+  const recoveryKey = 'st_private_journal:book:chenyan.png:chat-recovery';
+  storedBooks.set(recoveryKey, {
+    ...JSON.parse(JSON.stringify(vm.runInContext('blankBook()', sandbox))),
+    chatId: 'chat-recovery',
+    pages: [{ id: 'saved-daily', type: 'daily_note', title: '已经保存的日记', body: '日记正文' }],
+  });
+  storedBooks.set(`${recoveryKey}:backup`, {
+    ...JSON.parse(JSON.stringify(vm.runInContext('blankBook()', sandbox))),
+    chatId: 'chat-recovery',
+    pages: [{ id: 'saved-impression', type: 'impression', title: '快照里的印象', body: '印象正文' }],
+  });
+  contextValue.chatId = 'chat-recovery';
+  await vm.runInContext('loadBook()', sandbox);
+  assert.deepEqual(
+    Array.from(vm.runInContext('currentBook.pages', sandbox), page => page.id).sort(),
+    ['saved-daily', 'saved-impression'],
+    '加载时必须合并主存储和恢复快照中的历史页面',
+  );
+  assert.deepEqual(
+    storedBooks.get(recoveryKey).pages.map(page => page.id).sort(),
+    ['saved-daily', 'saved-impression'],
+    '合并后的历史页面必须重新写回主存储',
+  );
+  assert.deepEqual(
+    storedBooks.get(`${recoveryKey}:backup`).pages.map(page => page.id).sort(),
+    ['saved-daily', 'saved-impression'],
+    '合并后的历史页面必须同步到恢复快照',
+  );
+  vm.runInContext('currentBook = null', sandbox);
+  await vm.runInContext('loadBook()', sandbox);
+  assert.equal(vm.runInContext('currentBook.pages.length', sandbox), 2, '重新打开手札后页面仍需存在');
+
+  const concurrentKey = 'st_private_journal:book:chenyan.png:chat-concurrent';
+  const oldConcurrentBook = {
+    ...JSON.parse(JSON.stringify(vm.runInContext('blankBook()', sandbox))),
+    chatId: 'chat-concurrent',
+    pages: [{ id: 'old-page', type: 'daily_note', title: '旧页', body: '旧内容' }],
+  };
+  storedBooks.set(concurrentKey, oldConcurrentBook);
+  let releaseConcurrentLoad;
+  const concurrentLoadGate = new Promise(resolve => { releaseConcurrentLoad = resolve; });
+  sandbox.SillyTavern.libs.localforage.getItem = async key => {
+    const snapshot = storedBooks.has(key) ? JSON.parse(JSON.stringify(storedBooks.get(key))) : null;
+    if (key === concurrentKey) await concurrentLoadGate;
+    return snapshot;
+  };
+  contextValue.chatId = 'chat-concurrent';
+  const pendingConcurrentLoad = vm.runInContext('loadBook()', sandbox);
+  sandbox.concurrentKey = concurrentKey;
+  sandbox.concurrentBook = {
+    ...oldConcurrentBook,
+    pages: [{ id: 'new-impression', type: 'impression', title: '刚生成的印象', body: '不能丢失的新内容' }],
+  };
+  await vm.runInContext('currentBook = concurrentBook; currentBookStorageKey = concurrentKey; saveBook()', sandbox);
+  releaseConcurrentLoad();
+  await pendingConcurrentLoad;
+  assert.equal(storedBooks.get(concurrentKey).pages[0].id, 'new-impression', '加载中的旧快照不能覆盖刚生成并保存的新页面');
   console.log('Private Journal smoke tests passed.');
 })().catch(error => {
   console.error(error);

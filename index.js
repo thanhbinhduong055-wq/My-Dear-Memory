@@ -1,5 +1,6 @@
 const MODULE_ID = 'st_private_journal';
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
+const STORAGE_BACKUP_SUFFIX = ':backup';
 const EXTENSION_SCRIPT_URL = document.currentScript?.src || '';
 
 const DEFAULTS = {
@@ -14,6 +15,9 @@ const DEFAULTS = {
 
 let root;
 let currentBook = null;
+let currentBookStorageKey = null;
+let bookLoadRevision = 0;
+const bookWriteRevisions = new Map();
 let activeType = 'impression';
 let activeImpressionFocus = 'overall';
 let customImpressionRequest = '';
@@ -144,7 +148,7 @@ function storageKey() {
 function blankBook() {
   const id = identity();
   return {
-    version: 7,
+    version: 8,
     ...id,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -154,15 +158,72 @@ function blankBook() {
   };
 }
 
+function backupStorageKey(key) {
+  return `${key}${STORAGE_BACKUP_SUFFIX}`;
+}
+
+function storedPageKey(page) {
+  if (page?.id) return `id:${page.id}`;
+  return `legacy:${[
+    page?.type,
+    page?.createdAt,
+    page?.title,
+    page?.body,
+  ].map(value => String(value || '')).join('\u0000')}`;
+}
+
+function mergeStoredBooks(primaryBook, backupBook) {
+  if (!primaryBook && !backupBook) return null;
+  const primaryRevision = Number(primaryBook?.persistenceRevision) || 0;
+  const backupRevision = Number(backupBook?.persistenceRevision) || 0;
+  if (primaryBook && backupBook && primaryRevision !== backupRevision && (primaryRevision || backupRevision)) {
+    return primaryRevision > backupRevision ? primaryBook : backupBook;
+  }
+
+  const base = primaryBook || backupBook;
+  const pages = [];
+  const seen = new Set();
+  for (const book of [primaryBook, backupBook]) {
+    for (const page of Array.isArray(book?.pages) ? book.pages : []) {
+      const key = storedPageKey(page);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pages.push(page);
+    }
+  }
+  pages.sort((a, b) => String(b?.createdAt || '').localeCompare(String(a?.createdAt || '')));
+  return { ...base, pages };
+}
+
 async function loadBook() {
-  currentBook = await SillyTavern.libs.localforage.getItem(storageKey()) || blankBook();
-  migrateBook(currentBook);
-  await SillyTavern.libs.localforage.setItem(storageKey(), currentBook);
+  const targetKey = storageKey();
+  const targetLoadRevision = ++bookLoadRevision;
+  const startingWriteRevision = bookWriteRevisions.get(targetKey) || 0;
+  const [storedBook, backupBook] = await Promise.all([
+    SillyTavern.libs.localforage.getItem(targetKey),
+    SillyTavern.libs.localforage.getItem(backupStorageKey(targetKey)),
+  ]);
+  if (
+    targetLoadRevision !== bookLoadRevision
+    || targetKey !== storageKey()
+    || startingWriteRevision !== (bookWriteRevisions.get(targetKey) || 0)
+  ) return false;
+
+  const loadedBook = mergeStoredBooks(storedBook, backupBook) || blankBook();
+  const primarySnapshot = storedBook ? JSON.stringify(storedBook) : '';
+  migrateBook(loadedBook);
+  if (!storedBook || primarySnapshot !== JSON.stringify(loadedBook)) {
+    await saveSpecificBook(loadedBook, targetKey);
+  }
+  if (targetLoadRevision !== bookLoadRevision || targetKey !== storageKey()) return false;
+  currentBook = loadedBook;
+  currentBookStorageKey = targetKey;
   render();
+  return true;
 }
 
 function migrateBook(book) {
-  book.version = 7;
+  book.version = 8;
   book.pages = Array.isArray(book.pages) ? book.pages : [];
   book.pages = book.pages.map(page => {
     if (page.type === 'first_impression') {
@@ -196,13 +257,20 @@ function isInitialImpression(book = currentBook) {
 }
 
 async function saveBook() {
-  currentBook.updatedAt = new Date().toISOString();
-  await SillyTavern.libs.localforage.setItem(storageKey(), currentBook);
+  if (!currentBook) return;
+  await saveSpecificBook(currentBook, currentBookStorageKey || storageKey());
 }
 
 async function saveSpecificBook(book, key) {
   book.updatedAt = new Date().toISOString();
+  book.persistenceRevision = (Number(book.persistenceRevision) || 0) + 1;
+  bookWriteRevisions.set(key, (bookWriteRevisions.get(key) || 0) + 1);
   await SillyTavern.libs.localforage.setItem(key, book);
+  try {
+    await SillyTavern.libs.localforage.setItem(backupStorageKey(key), book);
+  } catch (error) {
+    console.warn('[Private Journal] Primary journal saved, but the recovery snapshot could not be updated.', error);
+  }
 }
 
 function buildPrompt(type, options = {}) {
