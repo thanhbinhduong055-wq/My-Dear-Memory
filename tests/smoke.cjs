@@ -52,13 +52,16 @@ assert.equal(vm.runInContext('DEFAULTS.desk', sandbox), 'pearl-cream');
 assert.equal(vm.runInContext('DEFAULTS.generationApiMode', sandbox), 'main');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
+assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
+assert.equal(vm.runInContext("PAGE_TYPES.calendar.label", sandbox), '心情月历');
 for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-marble', 'magnolia-swallow']) {
-  assert.match(styleSource, new RegExp(`assets/themes/cutouts/${theme}\\.png`));
-  assert.equal(fs.existsSync(require.resolve(`../assets/themes/cutouts/${theme}.png`)), true);
+  assert.match(styleSource, new RegExp(`assets/themes/cutouts/${theme}\\.webp`));
+  assert.equal(fs.existsSync(require.resolve(`../assets/themes/cutouts/${theme}.webp`)), true);
 }
-for (const desk of ['forest-walnut.png', 'light-ash.png', 'olive-warmwood.png', 'magnolia-inkstone.png']) {
+for (const desk of ['forest-walnut.webp', 'light-ash.webp', 'olive-warmwood.webp', 'magnolia-inkstone.webp']) {
   assert.equal(fs.existsSync(require.resolve(`../assets/backgrounds/${desk}`)), true);
 }
+assert.doesNotMatch(styleSource, /assets\/(?:themes\/cutouts|backgrounds)\/[^)'\"]+\.png/);
 assert.match(styleSource, /--pj-spread-ratio/);
 assert.match(source, /class="pj-scene-close"/);
 assert.match(source, /class="pj-cover-art"/);
@@ -83,6 +86,18 @@ assert.match(source, /pj-quote-capture-preview/);
 assert.match(styleSource, /\.pj-extension-open-button/);
 assert.match(styleSource, /@media\(max-width:860px\)[\s\S]*?width:calc\(100vw - 20px\)/);
 assert.doesNotMatch(styleSource, /@media\(max-width:860px\)[\s\S]*?width:980px/);
+assert.match(styleSource, /#private-journal-launcher[^}]*touch-action:none/);
+assert.match(styleSource, /pj-reader-out-forward/);
+assert.match(styleSource, /pj-reader-in-forward/);
+const openJournalStart = source.indexOf('async function openJournal()');
+const openJournalEnd = source.indexOf('\n}', openJournalStart);
+const openJournalSource = source.slice(openJournalStart, openJournalEnd);
+assert.ok(
+  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf('await loadBook()'),
+  '移动端点击后必须先显示手札，再等待 IndexedDB 加载',
+);
+assert.equal(vm.runInContext("launcherDragThreshold('touch')", sandbox), 14);
+assert.equal(vm.runInContext("launcherDragThreshold('mouse')", sandbox), 5);
 
 const strictPage = vm.runInContext(`parseJson('{"title":"雨后","body":"我们回到了屋檐下。"}', 'daily_note')`, sandbox);
 assert.equal(strictPage.title, '雨后');
@@ -197,12 +212,43 @@ assert.equal(batchResult.relationship.status, 'uncertain');
 assert.equal(batchResult.accompaniment, undefined);
 
 const legacyBook = vm.runInContext(`migrateBook({ pages: [{ type: 'first_impression', poem: { text: '旧诗' }, song: { title: '旧歌' }, hasRoundAccompaniment: true }] })`, sandbox);
-assert.equal(legacyBook.version, 9);
+assert.equal(legacyBook.version, 10);
 assert.equal(legacyBook.pages[0].type, 'impression');
 assert.equal(legacyBook.pages[0].impressionStage, 'initial');
 assert.equal(legacyBook.pages[0].poem, undefined);
 assert.equal(legacyBook.pages[0].song, undefined);
 assert.equal(legacyBook.pages[0].hasRoundAccompaniment, undefined);
+assert.deepEqual(Object.keys(legacyBook.calendar.entries), []);
+
+const calendarBook = vm.runInContext(`migrateBook({ pages: [], calendar: { entries: {
+  '2026-09-01': { emoji: '🌷', updatedAt: '2026-09-01T08:00:00.000Z' }
+} } })`, sandbox);
+sandbox.calendarBook = calendarBook;
+const september = vm.runInContext(`calendarMonthModel('2026-09', calendarBook.calendar)`, sandbox);
+assert.equal(september.label, '2026年9月');
+assert.equal(september.cells.length, 42);
+assert.equal(september.cells[1].dateKey, '2026-09-01');
+assert.equal(september.cells[1].emoji, '🌷');
+assert.equal(vm.runInContext(`setCalendarEntry(calendarBook, '2026-09-02', '🌙')`, sandbox), true);
+assert.equal(calendarBook.calendar.entries['2026-09-02'].emoji, '🌙');
+assert.equal(vm.runInContext(`setCalendarEntry(calendarBook, '2026-09-02', '')`, sandbox), true);
+assert.equal(calendarBook.calendar.entries['2026-09-02'].deleted, true);
+
+const cloudSnapshot = vm.runInContext(`createSyncedBookSnapshot({
+  version: 10,
+  pages: [{ id: 'with-sticker', type: 'daily_note', body: '正文里的 Emoji 🫶', stickers: [{ id: 'large', dataUrl: 'data:image/png;base64,AAAA' }] }],
+  calendar: { entries: { '2026-09-03': { emoji: '☕', updatedAt: 'now' } } }
+})`, sandbox);
+assert.equal(cloudSnapshot.pages[0].body, '正文里的 Emoji 🫶');
+assert.equal(cloudSnapshot.pages[0].stickers, undefined, '聊天元数据不得塞入本机表情包二进制');
+assert.equal(cloudSnapshot.calendar.entries['2026-09-03'].emoji, '☕');
+
+const crossDeviceMerge = vm.runInContext(`mergeStoredBooks(
+  { updatedAt: '2026-08-01T00:00:00.000Z', persistenceRevision: 99, relationship: { status: 'unchecked' }, pages: [{ id: 'old-local', body: '旧设备本地页' }] },
+  { updatedAt: '2026-09-01T00:00:00.000Z', persistenceRevision: 2, relationship: { status: 'partners' }, pages: [{ id: 'new-remote', body: '新设备同步页' }] }
+)`, sandbox);
+assert.equal(crossDeviceMerge.relationship.status, 'partners', '跨设备合并应优先采用更新时间更晚的状态，而不是单机修订次数');
+assert.deepEqual(Array.from(crossDeviceMerge.pages, page => page.id).sort(), ['new-remote', 'old-local']);
 
 const separatedPages = vm.runInContext(`pagesForType({ pages: [
   { type: 'impression', title: '印象一' },
@@ -250,13 +296,16 @@ const wordParts = vm.runInContext(`buildWordDocumentParts({
   userName: '姜藏', characterName: '陈砚', pages: [
     { id: 'quote-1', type: 'quote_note', title: '雨夜对白', dateLabel: '雨夜', mood: '想留下来的话', body: '你 & 我 <一起>', quoteSpeaker: '陈砚', createdAt: '2025-01-18T00:00:00.000Z' },
     { id: 'daily-1', type: 'daily_note', title: '旧数据迁移', dateLabel: '从前', mood: '安静', body: '只保留这一段正文。', poem: { text: '不应导出的旧诗句' }, song: { title: '不应导出的旧歌曲', excerpt: '不应导出的旧歌词' } }
-  ]
+  ],
+  calendar: { entries: { '2026-09-02': { emoji: '🌷', updatedAt: '2026-09-02T09:00:00.000Z' } } }
 })`, sandbox);
 assert.equal(typeof wordParts['[Content_Types].xml'], 'string');
 assert.match(wordParts['word/document.xml'], /姜藏 × 陈砚的私语手札/);
 assert.match(wordParts['word/document.xml'], /你 &amp; 我 &lt;一起&gt;/);
 assert.match(wordParts['word/document.xml'], /只保留这一段正文/);
 assert.doesNotMatch(wordParts['word/document.xml'], /不应导出的旧诗句|不应导出的旧歌曲|不应导出的旧歌词/);
+assert.match(wordParts['word/document.xml'], /心情月历/);
+assert.match(wordParts['word/document.xml'], /2026-09-02　🌷/);
 assert.match(wordParts['word/styles.xml'], /w:styleId="Quote"/);
 const wordZip = vm.runInContext(`createStoredZip(buildWordDocumentParts({ userName: '姜藏', characterName: '陈砚', pages: [] }))`, sandbox);
 assert.deepEqual(Array.from(wordZip.slice(0, 4)), [80, 75, 3, 4]);
@@ -322,6 +371,22 @@ assert.equal(monthDecision.period.isExtended, true);
 assert.match(monthDecision.period.label, /2025年1月1日/);
 
 (async () => {
+  let metadataSaveCalls = 0;
+  const remoteOnlyBook = JSON.parse(JSON.stringify(vm.runInContext('blankBook()', sandbox)));
+  remoteOnlyBook.pages = [{ id: 'remote-diary', type: 'daily_note', title: '另一台设备的日记', body: '应该随聊天回来。' }];
+  contextValue.chatMetadata = { st_private_journal: remoteOnlyBook };
+  contextValue.saveMetadata = async () => { metadataSaveCalls += 1; };
+  const cloudLocalStore = new Map();
+  sandbox.SillyTavern.libs.localforage = {
+    getItem: async key => cloudLocalStore.get(key) || null,
+    setItem: async (key, value) => { cloudLocalStore.set(key, JSON.parse(JSON.stringify(value))); return value; },
+  };
+  await vm.runInContext('loadBook()', sandbox);
+  assert.equal(vm.runInContext('currentBook.pages[0].id', sandbox), 'remote-diary', '新设备应从聊天元数据恢复手札');
+  await vm.runInContext('saveBook()', sandbox);
+  assert.ok(metadataSaveCalls >= 1, '保存手札时必须调用 SillyTavern 的服务端聊天元数据保存');
+  assert.equal(contextValue.chatMetadata.st_private_journal.pages[0].id, 'remote-diary');
+
   let receivedOptions;
   contextValue.generateQuietPrompt = async options => {
     receivedOptions = options;
@@ -464,6 +529,7 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
       return value;
     },
   };
+  contextValue.chatMetadata = {};
   contextValue.chatId = 'chat-a';
   const staleLoad = vm.runInContext('loadBook()', sandbox);
   contextValue.chatId = 'chat-b';
@@ -483,6 +549,7 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
     chatId: 'chat-recovery',
     pages: [{ id: 'saved-impression', type: 'impression', title: '快照里的印象', body: '印象正文' }],
   });
+  contextValue.chatMetadata = {};
   contextValue.chatId = 'chat-recovery';
   await vm.runInContext('loadBook()', sandbox);
   assert.deepEqual(
@@ -518,6 +585,7 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
     if (key === concurrentKey) await concurrentLoadGate;
     return snapshot;
   };
+  contextValue.chatMetadata = {};
   contextValue.chatId = 'chat-concurrent';
   const pendingConcurrentLoad = vm.runInContext('loadBook()', sandbox);
   sandbox.concurrentKey = concurrentKey;

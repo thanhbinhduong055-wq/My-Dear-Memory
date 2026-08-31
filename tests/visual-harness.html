@@ -20,7 +20,7 @@
   <div id="rm_extensions_block" hidden><div id="extensions_settings"></div><div id="extensions_settings2"></div></div>
   <script>
     const sampleBook = {
-      version: 8,
+      version: 10,
       chatId: 'visual-chat',
       characterId: 'chen-yan',
       userName: '姜藏',
@@ -33,6 +33,11 @@
         source: 'model'
       },
       timeline: { currentDayKey: 'date:2025-01-18', currentDayLabel: '2025年1月18日', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
+      calendar: { entries: {
+        '2026-09-01': { emoji: '🫶', updatedAt: new Date().toISOString() },
+        '2026-09-03': { emoji: '☕', updatedAt: new Date().toISOString() },
+        '2026-09-08': { emoji: '🌙', updatedAt: new Date().toISOString() }
+      } },
       pages: [
         {
           id: 'quote-1', type: 'quote_note', title: '下雨了，就向我这边走', dateLabel: '雨夜',
@@ -81,6 +86,8 @@
       onlineStatus: 'connected',
       eventTypes: {},
       eventSource: { on() {} },
+      chatMetadata: { st_private_journal: sampleBook },
+      saveMetadata: async () => undefined,
       saveSettingsDebounced() {},
       generateQuietPrompt: async () => ''
     };

@@ -1,8 +1,9 @@
 const MODULE_ID = 'st_private_journal';
+const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
 const EXTENSION_SCRIPT_URL = document.currentScript?.src || '';
-const BOOK_VERSION = 9;
+const BOOK_VERSION = 10;
 const MAX_STICKER_BYTES = 700 * 1024;
 
 const DEFAULTS = {
@@ -39,6 +40,7 @@ let queuedType = null;
 let autoGenerationTimer = null;
 let autoGenerationRetries = 0;
 let pageTurnTimer = null;
+let pageTurnSwapTimer = null;
 let wandMenuObserver = null;
 let secondaryModelOptions = [];
 let secondaryModelsProfileId = '';
@@ -46,8 +48,11 @@ let editingPageId = null;
 let editingPageDraft = '';
 let mobilePan = { x: 0, y: 0 };
 let lastStatus = '等待正文';
+let calendarMonthCursor = localMonthKey(new Date());
+let selectedCalendarDate = localDateKey(new Date());
 
 const EMOJI_CHOICES = ['♡', '🥰', '🥺', '☺️', '🫶', '🌷', '✨', '☕', '🌙', '🫂', '💌', '🍓'];
+const CALENDAR_EMOJIS = ['♡', '🥰', '☺️', '🫶', '🌷', '✨', '☕', '🌙', '🌧️', '🍓', '🎂', '🧸'];
 
 const PAGE_LENGTH_RULES = {
   impression: '220至320字',
@@ -81,6 +86,12 @@ const PAGE_TYPES = {
     empty: '恋爱日记还没有落笔。',
     instruction: '以 User 的第一人称记录 User 与 Char 作为伴侣之后的恋爱日常。正文至少三分之二用于 User 的内心感受、依恋、安心、不安、占有欲、亲密需求或关系变化，事件只作为情绪的锚点。只能使用已发生或上下文明示的内容。',
   },
+  calendar: {
+    label: '心情月历',
+    icon: '▦',
+    empty: '在每一天放一枚小小的心情标记。',
+    instruction: '月历由 User 手动标记，不调用模型生成。',
+  },
   quote_note: {
     label: '小纸条',
     icon: '❝',
@@ -110,19 +121,19 @@ const IMPRESSION_FOCUSES = {
 };
 
 const THEMES = {
-  'botanical-noir': { label: '暮色蔷薇', shortLabel: '蔷薇', asset: './assets/themes/cutouts/botanical-noir.png' },
-  'rococo-garden': { label: '洛可可花园', shortLabel: '花园', asset: './assets/themes/cutouts/rococo-garden.png' },
-  'indigo-reed': { label: '蓝染芒影', shortLabel: '蓝染', asset: './assets/themes/cutouts/indigo-reed.png' },
-  'italian-marble': { label: '托斯卡纳纹理', shortLabel: '纹理', asset: './assets/themes/cutouts/italian-marble.png' },
-  'magnolia-swallow': { label: '玉兰燕影', shortLabel: '玉兰', asset: './assets/themes/cutouts/magnolia-swallow.png' },
+  'botanical-noir': { label: '暮色蔷薇', shortLabel: '蔷薇', asset: './assets/themes/cutouts/botanical-noir.webp' },
+  'rococo-garden': { label: '洛可可花园', shortLabel: '花园', asset: './assets/themes/cutouts/rococo-garden.webp' },
+  'indigo-reed': { label: '蓝染芒影', shortLabel: '蓝染', asset: './assets/themes/cutouts/indigo-reed.webp' },
+  'italian-marble': { label: '托斯卡纳纹理', shortLabel: '纹理', asset: './assets/themes/cutouts/italian-marble.webp' },
+  'magnolia-swallow': { label: '玉兰燕影', shortLabel: '玉兰', asset: './assets/themes/cutouts/magnolia-swallow.webp' },
 };
 
 const DESKS = {
   'pearl-cream': { label: '珍珠奶油', shortLabel: '珍珠', asset: './assets/backgrounds/writing-desk.jpg' },
-  'forest-walnut': { label: '暮林胡桃', shortLabel: '暮林', asset: './assets/backgrounds/forest-walnut.png' },
-  'light-ash': { label: '浅木芦影', shortLabel: '浅木', asset: './assets/backgrounds/light-ash.png' },
-  'olive-warmwood': { label: '橄榄暖木', shortLabel: '暖木', asset: './assets/backgrounds/olive-warmwood.png' },
-  'magnolia-inkstone': { label: '玉兰墨砚', shortLabel: '墨砚', asset: './assets/backgrounds/magnolia-inkstone.png' },
+  'forest-walnut': { label: '暮林胡桃', shortLabel: '暮林', asset: './assets/backgrounds/forest-walnut.webp' },
+  'light-ash': { label: '浅木芦影', shortLabel: '浅木', asset: './assets/backgrounds/light-ash.webp' },
+  'olive-warmwood': { label: '橄榄暖木', shortLabel: '暖木', asset: './assets/backgrounds/olive-warmwood.webp' },
+  'magnolia-inkstone': { label: '玉兰墨砚', shortLabel: '墨砚', asset: './assets/backgrounds/magnolia-inkstone.webp' },
 };
 
 function extensionAssetUrl(asset) {
@@ -178,6 +189,80 @@ function storageKey() {
   return `${STORAGE_PREFIX}${id.characterId}:${id.chatId}`;
 }
 
+function localDateKey(date) {
+  const value = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(value.getTime())) return localDateKey(new Date());
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
+
+function localMonthKey(date) {
+  return localDateKey(date).slice(0, 7);
+}
+
+function normalizeCalendar(calendar) {
+  const entries = {};
+  for (const [dateKey, rawEntry] of Object.entries(calendar?.entries || {})) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+    const emoji = String(typeof rawEntry === 'string' ? rawEntry : rawEntry?.emoji || '').trim().slice(0, 16);
+    const deleted = Boolean(rawEntry?.deleted);
+    if (!emoji && !deleted) continue;
+    entries[dateKey] = {
+      emoji,
+      updatedAt: String(rawEntry?.updatedAt || ''),
+      ...(deleted ? { deleted: true } : {}),
+    };
+  }
+  return { entries };
+}
+
+function mergeCalendars(books) {
+  const merged = {};
+  for (const book of books) {
+    const sourceRevision = Number(book?.persistenceRevision) || 0;
+    for (const [dateKey, entry] of Object.entries(normalizeCalendar(book?.calendar).entries)) {
+      const existing = merged[dateKey];
+      const candidateTime = Date.parse(entry.updatedAt) || sourceRevision;
+      const existingTime = Date.parse(existing?.updatedAt) || Number(existing?._sourceRevision) || 0;
+      if (!existing || candidateTime >= existingTime) merged[dateKey] = { ...entry, _sourceRevision: sourceRevision };
+    }
+  }
+  for (const entry of Object.values(merged)) delete entry._sourceRevision;
+  return { entries: merged };
+}
+
+function calendarMonthModel(monthKey = calendarMonthCursor, calendar = currentBook?.calendar) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || ''));
+  const fallback = localMonthKey(new Date());
+  const safeMatch = match || /^(\d{4})-(\d{2})$/.exec(fallback);
+  const year = Number(safeMatch[1]);
+  const monthIndex = Number(safeMatch[2]) - 1;
+  const firstDay = new Date(year, monthIndex, 1);
+  const leading = (firstDay.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+  const entries = normalizeCalendar(calendar).entries;
+  const cells = Array.from({ length: 42 }, (_, index) => {
+    const day = index - leading + 1;
+    if (day < 1 || day > daysInMonth) return { day: null, dateKey: null, emoji: '' };
+    const dateKey = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return { day, dateKey, emoji: entries[dateKey]?.deleted ? '' : (entries[dateKey]?.emoji || '') };
+  });
+  return { year, month: monthIndex + 1, key: `${year}-${String(monthIndex + 1).padStart(2, '0')}`, label: `${year}年${monthIndex + 1}月`, cells };
+}
+
+function shiftCalendarMonth(monthKey, offset) {
+  const model = calendarMonthModel(monthKey, { entries: {} });
+  return localMonthKey(new Date(model.year, model.month - 1 + Number(offset || 0), 1));
+}
+
+function setCalendarEntry(book, dateKey, emoji) {
+  if (!book || !/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ''))) return false;
+  book.calendar = normalizeCalendar(book.calendar);
+  const value = String(emoji || '').trim().slice(0, 16);
+  if (!value) book.calendar.entries[dateKey] = { emoji: '', deleted: true, updatedAt: new Date().toISOString() };
+  else book.calendar.entries[dateKey] = { emoji: value, updatedAt: new Date().toISOString() };
+  return true;
+}
+
 function blankBook() {
   const id = identity();
   return {
@@ -187,6 +272,7 @@ function blankBook() {
     updatedAt: new Date().toISOString(),
     relationship: { status: 'unchecked', reason: '', evidence: [], checkedAt: null, source: null },
     timeline: { currentDayKey: null, currentDayLabel: '', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
+    calendar: { entries: {} },
     pages: [],
   };
 }
@@ -205,18 +291,20 @@ function storedPageKey(page) {
   ].map(value => String(value || '')).join('\u0000')}`;
 }
 
-function mergeStoredBooks(primaryBook, backupBook) {
-  if (!primaryBook && !backupBook) return null;
-  const primaryRevision = Number(primaryBook?.persistenceRevision) || 0;
-  const backupRevision = Number(backupBook?.persistenceRevision) || 0;
-  if (primaryBook && backupBook && primaryRevision !== backupRevision && (primaryRevision || backupRevision)) {
-    return primaryRevision > backupRevision ? primaryBook : backupBook;
-  }
-
-  const base = primaryBook || backupBook;
+function mergeStoredBooks(...candidates) {
+  const books = candidates.filter(book => book && typeof book === 'object');
+  if (!books.length) return null;
+  const rankedBooks = [...books].sort((a, b) => {
+    const updatedDelta = (Date.parse(b?.updatedAt) || 0) - (Date.parse(a?.updatedAt) || 0);
+    if (updatedDelta) return updatedDelta;
+    const revisionDelta = (Number(b?.persistenceRevision) || 0) - (Number(a?.persistenceRevision) || 0);
+    if (revisionDelta) return revisionDelta;
+    return 0;
+  });
+  const base = rankedBooks[0];
   const pages = [];
   const seen = new Set();
-  for (const book of [primaryBook, backupBook]) {
+  for (const book of rankedBooks) {
     for (const page of Array.isArray(book?.pages) ? book.pages : []) {
       const key = storedPageKey(page);
       if (seen.has(key)) continue;
@@ -225,13 +313,39 @@ function mergeStoredBooks(primaryBook, backupBook) {
     }
   }
   pages.sort((a, b) => String(b?.createdAt || '').localeCompare(String(a?.createdAt || '')));
-  return { ...base, pages };
+  return { ...base, pages, calendar: mergeCalendars(rankedBooks) };
+}
+
+function createSyncedBookSnapshot(book) {
+  const snapshot = JSON.parse(JSON.stringify(book || {}));
+  snapshot.calendar = normalizeCalendar(snapshot.calendar);
+  snapshot.pages = (Array.isArray(snapshot.pages) ? snapshot.pages : []).map(page => {
+    const cleanPage = { ...page };
+    delete cleanPage.stickers;
+    return cleanPage;
+  });
+  return snapshot;
+}
+
+function currentChatMetadataBook() {
+  const metadata = ctx().chatMetadata;
+  return metadata && typeof metadata === 'object' ? metadata[CHAT_METADATA_KEY] : null;
+}
+
+async function syncBookToChatMetadata(book, key) {
+  if (key !== storageKey()) return false;
+  const context = ctx();
+  if (!context.chatMetadata || typeof context.chatMetadata !== 'object' || typeof context.saveMetadata !== 'function') return false;
+  context.chatMetadata[CHAT_METADATA_KEY] = createSyncedBookSnapshot(book);
+  await context.saveMetadata();
+  return true;
 }
 
 async function loadBook() {
   const targetKey = storageKey();
   const targetLoadRevision = ++bookLoadRevision;
   const startingWriteRevision = bookWriteRevisions.get(targetKey) || 0;
+  const remoteBook = currentChatMetadataBook();
   const [storedBook, backupBook] = await Promise.all([
     SillyTavern.libs.localforage.getItem(targetKey),
     SillyTavern.libs.localforage.getItem(backupStorageKey(targetKey)),
@@ -242,10 +356,12 @@ async function loadBook() {
     || startingWriteRevision !== (bookWriteRevisions.get(targetKey) || 0)
   ) return false;
 
-  const loadedBook = mergeStoredBooks(storedBook, backupBook) || blankBook();
+  const loadedBook = mergeStoredBooks(storedBook, backupBook, remoteBook) || blankBook();
   const primarySnapshot = storedBook ? JSON.stringify(storedBook) : '';
   migrateBook(loadedBook);
-  if (!storedBook || primarySnapshot !== JSON.stringify(loadedBook)) {
+  const remoteSnapshot = remoteBook ? JSON.stringify(createSyncedBookSnapshot(remoteBook)) : '';
+  const nextRemoteSnapshot = JSON.stringify(createSyncedBookSnapshot(loadedBook));
+  if (!storedBook || primarySnapshot !== JSON.stringify(loadedBook) || remoteSnapshot !== nextRemoteSnapshot) {
     await saveSpecificBook(loadedBook, targetKey);
   }
   if (targetLoadRevision !== bookLoadRevision || targetKey !== storageKey()) return false;
@@ -282,6 +398,7 @@ function migrateBook(book) {
     { currentDayKey: null, currentDayLabel: '', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
     book.timeline || {},
   );
+  book.calendar = normalizeCalendar(book.calendar);
   return book;
 }
 
@@ -313,12 +430,28 @@ async function saveSpecificBook(book, key) {
   book.updatedAt = new Date().toISOString();
   book.persistenceRevision = (Number(book.persistenceRevision) || 0) + 1;
   bookWriteRevisions.set(key, (bookWriteRevisions.get(key) || 0) + 1);
-  await SillyTavern.libs.localforage.setItem(key, book);
+  let savedLocally = false;
+  let savedRemotely = false;
+  let lastError = null;
   try {
-    await SillyTavern.libs.localforage.setItem(backupStorageKey(key), book);
+    await SillyTavern.libs.localforage.setItem(key, book);
+    savedLocally = true;
+    try {
+      await SillyTavern.libs.localforage.setItem(backupStorageKey(key), book);
+    } catch (error) {
+      console.warn('[Private Journal] Primary journal saved, but the recovery snapshot could not be updated.', error);
+    }
   } catch (error) {
-    console.warn('[Private Journal] Primary journal saved, but the recovery snapshot could not be updated.', error);
+    lastError = error;
+    console.warn('[Private Journal] Local journal storage failed; trying chat metadata sync.', error);
   }
+  try {
+    savedRemotely = await syncBookToChatMetadata(book, key);
+  } catch (error) {
+    lastError = error;
+    console.warn('[Private Journal] Journal saved locally, but chat metadata sync failed.', error);
+  }
+  if (!savedLocally && !savedRemotely) throw lastError || new Error('手札无法写入本机或聊天元数据');
 }
 
 function buildPrompt(type, options = {}) {
@@ -785,7 +918,9 @@ function setGeneratingUi(generating) {
   const button = root?.querySelector('[data-action="generate"]');
   if (!button) return;
   const isQuote = activeType === 'quote_note';
-  button.disabled = generating || (isQuote && !quoteDraft.trim());
+  const isCalendar = activeType === 'calendar';
+  button.hidden = isCalendar;
+  button.disabled = isCalendar || generating || (isQuote && !quoteDraft.trim());
   button.textContent = generating ? '正在拾取回忆…' : (isQuote ? '保存小纸条' : `生成${PAGE_TYPES[activeType]?.label || '这一页'}`);
 }
 
@@ -1571,6 +1706,7 @@ function buildWordDocumentParts(book = currentBook) {
   const exportedAt = new Date().toLocaleString('zh-CN', { hour12: false });
   const sections = [];
   for (const [type, meta] of Object.entries(PAGE_TYPES)) {
+    if (type === 'calendar') continue;
     const entries = pagesForType({ pages }, type).slice().reverse();
     if (!entries.length) continue;
     sections.push(wordParagraph(meta.label, 'Heading1'));
@@ -1584,6 +1720,13 @@ function buildWordDocumentParts(book = currentBook) {
       sections.push(wordParagraph(`${page.dateLabel || '此刻'}  ·  ${page.mood || '未命名的心绪'}`, 'Meta'));
       sections.push(wordBodyParagraphs(page.body));
     }
+  }
+  const calendarEntries = Object.entries(normalizeCalendar(safeBook.calendar).entries)
+    .filter(([, entry]) => !entry.deleted && entry.emoji)
+    .sort(([dateA], [dateB]) => dateA.localeCompare(dateB));
+  if (calendarEntries.length) {
+    sections.push(wordParagraph('心情月历', 'Heading1'));
+    for (const [dateKey, entry] of calendarEntries) sections.push(wordParagraph(`${dateKey}　${entry.emoji}`));
   }
   if (!sections.length) sections.push(wordParagraph('还没有写下任何一页。'));
 
@@ -1755,6 +1898,23 @@ function pagesForType(book, type) {
   return pages.filter(page => page.type === type || (type === 'impression' && page.type === 'first_impression'));
 }
 
+function renderCalendar() {
+  const model = calendarMonthModel(calendarMonthCursor, currentBook?.calendar);
+  const today = localDateKey(new Date());
+  const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
+  const cells = model.cells.map(cell => {
+    if (!cell.dateKey) return '<span class="pj-calendar-day is-empty" aria-hidden="true"></span>';
+    const selected = cell.dateKey === selectedCalendarDate;
+    const classes = ['pj-calendar-day', selected ? 'is-selected' : '', cell.dateKey === today ? 'is-today' : '', cell.emoji ? 'has-mood' : ''].filter(Boolean).join(' ');
+    return `<button type="button" class="${classes}" data-calendar-day="${cell.dateKey}" aria-label="${model.month}月${cell.day}日${cell.emoji ? `，${escapeHtml(cell.emoji)}` : ''}" aria-pressed="${selected}"><span>${cell.day}</span><strong>${escapeHtml(cell.emoji)}</strong></button>`;
+  }).join('');
+  return `<section class="pj-calendar" aria-label="${escapeHtml(model.label)}心情月历">
+    <div class="pj-calendar-weekdays" aria-hidden="true">${weekdays.map(day => `<span>${day}</span>`).join('')}</div>
+    <div class="pj-calendar-grid">${cells}</div>
+    <p class="pj-calendar-hint">轻触日期，再从上方挑一枚 Emoji。月历会和文字手札一起随当前聊天保存。</p>
+  </section>`;
+}
+
 function renderAccessories() {
   if (!root) return;
   const id = identity();
@@ -1823,6 +1983,18 @@ function renderControls() {
     controls.innerHTML = `<div class="pj-quote-editor"><div class="pj-quote-editor-copy"><strong>收下一句舍不得忘记的话</strong><span>可在正文中选中对白，点击浮出的“收进小纸条”；也可以在这里手动粘贴。保存不会调用 API。</span></div><textarea class="pj-quote-input" data-quote-input maxlength="1500" placeholder="把想珍藏的对白放在这里…">${escapeHtml(quoteDraft)}</textarea><label class="pj-quote-speaker"><span>说话的人</span><input data-quote-speaker value="${escapeHtml(quoteSpeakerDraft)}" placeholder="${escapeHtml(identity().characterName)}"></label></div>`;
     return;
   }
+  if (activeType === 'calendar') {
+    const model = calendarMonthModel(calendarMonthCursor, currentBook.calendar);
+    if (!selectedCalendarDate.startsWith(`${model.key}-`)) selectedCalendarDate = `${model.key}-01`;
+    const selectedEntry = normalizeCalendar(currentBook.calendar).entries[selectedCalendarDate];
+    const selectedEmoji = selectedEntry?.deleted ? '' : selectedEntry?.emoji;
+    const emojiButtons = CALENDAR_EMOJIS.map(emoji => `<button type="button" class="${selectedEmoji === emoji ? 'active' : ''}" data-calendar-emoji="${escapeHtml(emoji)}" aria-label="把 ${escapeHtml(emoji)} 放到 ${escapeHtml(selectedCalendarDate)}" aria-pressed="${selectedEmoji === emoji}">${escapeHtml(emoji)}</button>`).join('');
+    controls.innerHTML = `<div class="pj-calendar-controls">
+      <div class="pj-calendar-nav"><button type="button" data-action="calendar-prev" aria-label="上个月">‹</button><strong>${escapeHtml(model.label)}</strong><button type="button" data-action="calendar-next" aria-label="下个月">›</button><button type="button" class="pj-text-button" data-action="calendar-today">今天</button></div>
+      <div class="pj-calendar-picker"><span><small>正在标记</small><strong>${escapeHtml(selectedCalendarDate)}</strong></span><div class="pj-calendar-emojis" role="group" aria-label="选择心情 Emoji">${emojiButtons}</div><button type="button" class="pj-text-button" data-action="calendar-clear" ${selectedEmoji ? '' : 'disabled'}>清除</button></div>
+    </div>`;
+    return;
+  }
   controls.innerHTML = '';
   controls.hidden = true;
 }
@@ -1872,6 +2044,7 @@ function renderApiRouter() {
 function render() {
   if (!root || !currentBook) return;
   const id = identity();
+  root.dataset.activeType = activeType;
   root.querySelector('.pj-title').textContent = `${id.userName} × ${id.characterName}`;
   root.querySelector('.pj-tabs').innerHTML = Object.entries(PAGE_TYPES).map(([key, value]) =>
     `<button class="${key === activeType ? 'active' : ''}" data-type="${key}" role="tab" aria-selected="${key === activeType}"><span>${value.icon}</span>${value.label}${key === 'romance_diary' && !isRomanceUnlocked() ? '<small>锁</small>' : ''}</button>`).join('');
@@ -1879,12 +2052,16 @@ function render() {
   if (bookmarkLabel) bookmarkLabel.textContent = PAGE_TYPES[activeType]?.label || '手札';
   renderControls();
   const visiblePages = pagesForType(currentBook, activeType);
-  root.querySelector('.pj-pages').innerHTML = visiblePages.length
-    ? visiblePages.map(renderPage).join('')
-    : `<div class="pj-empty">${escapeHtml(PAGE_TYPES[activeType]?.empty || '纸页还是空白。')}<br><small>${activeType === 'romance_diary' && !isRomanceUnlocked() ? '先确认关系，再记录只属于恋人的篇章。' : activeType === 'quote_note' ? '在正文里选中对白即可收藏，不会消耗 API。' : '生成后会独立保存于当前栏目。'}</small></div>`;
+  root.querySelector('.pj-pages').innerHTML = activeType === 'calendar'
+    ? renderCalendar()
+    : (visiblePages.length
+      ? visiblePages.map(renderPage).join('')
+      : `<div class="pj-empty">${escapeHtml(PAGE_TYPES[activeType]?.empty || '纸页还是空白。')}<br><small>${activeType === 'romance_diary' && !isRomanceUnlocked() ? '先确认关系，再记录只属于恋人的篇章。' : activeType === 'quote_note' ? '在正文里选中对白即可收藏，不会消耗 API。' : '生成后会独立保存于当前栏目。'}</small></div>`);
   const follow = root.querySelector('[data-setting="followMainGeneration"]');
   if (follow) follow.checked = Boolean(getSettings().followMainGeneration);
   renderApiRouter();
+  const apiHost = root.querySelector('.pj-api-router-host');
+  if (apiHost) apiHost.hidden = activeType === 'calendar';
   setGeneratingUi(journalGenerationActive);
   const generateButton = root.querySelector('[data-action="generate"]');
   if (generateButton && activeType === 'romance_diary' && !isRomanceUnlocked()) generateButton.disabled = true;
@@ -1902,14 +2079,17 @@ function turnToType(type) {
   const types = Object.keys(PAGE_TYPES);
   root.dataset.turnDirection = types.indexOf(type) >= types.indexOf(activeType) ? 'forward' : 'backward';
   clearTimeout(pageTurnTimer);
-  root.classList.remove('page-turning');
+  clearTimeout(pageTurnSwapTimer);
+  root.classList.remove('page-turning', 'page-turn-out', 'page-turn-in');
   void root.offsetWidth;
-  root.classList.add('page-turning');
-  pageTurnTimer = setTimeout(() => {
+  root.classList.add('page-turning', 'page-turn-out');
+  pageTurnSwapTimer = setTimeout(() => {
     activeType = type;
     render();
-    setTimeout(() => root?.classList.remove('page-turning'), 400);
-  }, 380);
+    root?.classList.remove('page-turn-out');
+    root?.classList.add('page-turn-in');
+    pageTurnTimer = setTimeout(() => root?.classList.remove('page-turning', 'page-turn-in'), 260);
+  }, 150);
 }
 
 function bind() {
@@ -1922,6 +2102,8 @@ function bind() {
     const deleteId = event.target.closest('[data-delete]')?.dataset.delete;
     const pageId = event.target.closest('[data-page-id]')?.dataset.pageId;
     const emoji = event.target.closest('[data-insert-emoji]')?.dataset.insertEmoji;
+    const calendarDay = event.target.closest('[data-calendar-day]')?.dataset.calendarDay;
+    const calendarEmoji = event.target.closest('[data-calendar-emoji]')?.dataset.calendarEmoji;
     const stickerDelete = event.target.closest('[data-sticker-delete]')?.dataset.stickerDelete;
     if (type) turnToType(type);
     if (impressionFocus) { activeImpressionFocus = impressionFocus; render(); }
@@ -1942,12 +2124,38 @@ function bind() {
     }
     if (action === 'close') {
       root.classList.remove('open');
+      const launcher = document.querySelector('#private-journal-launcher');
+      if (launcher) launcher.hidden = false;
       bookOpen = false;
       renderAccessories();
     }
     if (action === 'generate') {
       if (activeType === 'quote_note') await saveQuoteNote();
-      else await generatePage({ type: activeType, source: 'manual' });
+      else if (activeType !== 'calendar') await generatePage({ type: activeType, source: 'manual' });
+    }
+    if (calendarDay) {
+      selectedCalendarDate = calendarDay;
+      render();
+    }
+    if (calendarEmoji && selectedCalendarDate && setCalendarEntry(currentBook, selectedCalendarDate, calendarEmoji)) {
+      await saveBook();
+      render();
+      setStatus(`${selectedCalendarDate} 已放入 ${calendarEmoji}`);
+    }
+    if (action === 'calendar-prev' || action === 'calendar-next') {
+      calendarMonthCursor = shiftCalendarMonth(calendarMonthCursor, action === 'calendar-prev' ? -1 : 1);
+      selectedCalendarDate = `${calendarMonthCursor}-01`;
+      render();
+    }
+    if (action === 'calendar-today') {
+      selectedCalendarDate = localDateKey(new Date());
+      calendarMonthCursor = selectedCalendarDate.slice(0, 7);
+      render();
+    }
+    if (action === 'calendar-clear' && selectedCalendarDate && setCalendarEntry(currentBook, selectedCalendarDate, '')) {
+      await saveBook();
+      render();
+      setStatus(`${selectedCalendarDate} 的标记已清除`);
     }
     if (action === 'edit-page' && pageId) beginPageEdit(pageId);
     if (action === 'cancel-page-edit') cancelPageEdit();
@@ -2039,11 +2247,27 @@ function bind() {
 }
 
 async function openJournal() {
+  if (!root) return;
   bookOpen = false;
   resetMobilePan();
-  await loadBook();
   root.classList.add('open');
+  const launcher = document.querySelector('#private-journal-launcher');
+  if (launcher) launcher.hidden = true;
+  root.classList.add('pj-loading');
+  root.setAttribute('aria-busy', 'true');
   renderAccessories();
+  try {
+    await loadBook();
+  } catch (error) {
+    console.error('[Private Journal] Unable to load the journal database.', error);
+    currentBook ||= blankBook();
+    currentBookStorageKey ||= storageKey();
+    render();
+    toastr.warning('本机存储读取较慢或暂不可用，已先打开手札；请稍后重试。', '私语手札');
+  } finally {
+    root.classList.remove('pj-loading');
+    root.removeAttribute('aria-busy');
+  }
 }
 
 function applyMobilePan() {
@@ -2102,20 +2326,24 @@ function applyLauncherPosition(launcher) {
   launcher.style.bottom = 'auto';
 }
 
+function launcherDragThreshold(pointerType) {
+  return pointerType === 'touch' || pointerType === 'pen' ? 14 : 5;
+}
+
 function makeLauncherDraggable(launcher) {
   let drag = null;
   let suppressClickUntil = 0;
   launcher.addEventListener('pointerdown', event => {
     if (event.button !== 0) return;
     const rect = launcher.getBoundingClientRect();
-    drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, left: rect.left, top: rect.top, moved: false };
-    launcher.setPointerCapture?.(event.pointerId);
+    drag = { pointerId: event.pointerId, pointerType: event.pointerType || 'mouse', startX: event.clientX, startY: event.clientY, left: rect.left, top: rect.top, moved: false };
+    try { launcher.setPointerCapture?.(event.pointerId); } catch (error) { /* Synthetic and cancelled pointers may not be capturable. */ }
   });
   launcher.addEventListener('pointermove', event => {
     if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
-    if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+    if (!drag.moved && Math.hypot(dx, dy) < launcherDragThreshold(drag.pointerType)) return;
     drag.moved = true;
     event.preventDefault();
     const rect = launcher.getBoundingClientRect();
@@ -2126,19 +2354,22 @@ function makeLauncherDraggable(launcher) {
     launcher.style.right = 'auto';
     launcher.style.bottom = 'auto';
   });
-  const finishDrag = event => {
+  const finishDrag = (event, cancelled = false) => {
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (drag.moved) {
       suppressClickUntil = Date.now() + 350;
       const rect = launcher.getBoundingClientRect();
       getSettings().launcherPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
       ctx().saveSettingsDebounced?.();
+    } else if (!cancelled && (drag.pointerType === 'touch' || drag.pointerType === 'pen')) {
+      suppressClickUntil = Date.now() + 450;
+      void openJournal();
     }
-    launcher.releasePointerCapture?.(event.pointerId);
+    try { launcher.releasePointerCapture?.(event.pointerId); } catch (error) { /* Pointer may already be released by the browser. */ }
     drag = null;
   };
-  launcher.addEventListener('pointerup', finishDrag);
-  launcher.addEventListener('pointercancel', finishDrag);
+  launcher.addEventListener('pointerup', event => finishDrag(event, false));
+  launcher.addEventListener('pointercancel', event => finishDrag(event, true));
   launcher.addEventListener('click', event => {
     if (Date.now() < suppressClickUntil) {
       event.preventDefault();
