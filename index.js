@@ -1,8 +1,16 @@
+(() => {
+'use strict';
+
 const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
 const EXTENSION_SCRIPT_URL = document.currentScript?.src || '';
+const PLUGIN_VERSION = '0.19.0';
+const RUNTIME_KEY = '__stPrivateJournalRuntime';
+const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const STORAGE_READ_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageTimeoutMs) || 3000;
+const STORAGE_WRITE_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageWriteTimeoutMs) || 5000;
 const BOOK_VERSION = 10;
 const MAX_STICKER_BYTES = 700 * 1024;
 
@@ -50,6 +58,22 @@ let mobilePan = { x: 0, y: 0 };
 let lastStatus = '等待正文';
 let calendarMonthCursor = localMonthKey(new Date());
 let selectedCalendarDate = localDateKey(new Date());
+let lifecycleCleanups = [];
+let boundWandButton = null;
+let boundWandButtonHandler = null;
+let menuInstallFrame = null;
+let initializationRevision = 0;
+let pendingBookLoad = null;
+let pendingBookLoadKey = null;
+let storageRuntime = {
+  mode: 'checking',
+  reason: '',
+  phase: '',
+  lastError: null,
+  localForage: false,
+  indexedDB: typeof indexedDB !== 'undefined' && Boolean(indexedDB),
+  remoteSaved: false,
+};
 
 const EMOJI_CHOICES = ['♡', '🥰', '🥺', '☺️', '🫶', '🌷', '✨', '☕', '🌙', '🫂', '💌', '🍓'];
 const CALENDAR_EMOJIS = ['♡', '🥰', '☺️', '🫶', '🌷', '✨', '☕', '🌙', '🌧️', '🍓', '🎂', '🧸'];
@@ -161,6 +185,177 @@ function deskAssetUrl(deskKey) {
 
 function ctx() {
   return SillyTavern.getContext();
+}
+
+function registerCleanup(cleanup) {
+  if (typeof cleanup === 'function') lifecycleCleanups.push(cleanup);
+  return cleanup;
+}
+
+function safeToastr(level, message, title = '私语手札') {
+  try {
+    const method = globalThis.toastr?.[level];
+    if (typeof method === 'function') method(message, title, { timeOut: level === 'error' ? 12000 : 8000 });
+  } catch (error) {
+    console.warn(`[Private Journal v${PLUGIN_VERSION}] toastr:${level} failed`, error);
+  }
+}
+
+function isElementActuallyVisible(element) {
+  if (!element?.isConnected || element.hidden) return false;
+  for (let node = element; node; node = node.parentElement) {
+    if (node.hidden || node.getAttribute?.('aria-hidden') === 'true') return false;
+    const inlineDisplay = String(node.style?.display || '');
+    const inlineVisibility = String(node.style?.visibility || '');
+    if (inlineDisplay === 'none' || inlineVisibility === 'hidden') return false;
+    try {
+      const computed = window.getComputedStyle?.(node);
+      if (computed?.display === 'none' || computed?.visibility === 'hidden') return false;
+    } catch (error) { /* Detached test doubles and cross-realm elements may not expose computed styles. */ }
+  }
+  return true;
+}
+
+function selectExtensionDrawerContainer(candidates = null) {
+  const drawers = [...(candidates || document.querySelectorAll('#extensions_settings,#extensions_settings2'))]
+    .filter(element => element?.isConnected !== false);
+  if (!drawers.length) return null;
+  const visible = drawers.filter(isElementActuallyVisible);
+  const pool = visible.length ? visible : drawers;
+  return pool.find(element => element.id === 'extensions_settings2') || pool[0];
+}
+
+function selectedDrawerDescription() {
+  const drawer = selectExtensionDrawerContainer();
+  if (!drawer) return 'none';
+  return `#${drawer.id || 'unknown'}:${isElementActuallyVisible(drawer) ? 'visible' : 'fallback'}`;
+}
+
+function sillyTavernVersion() {
+  try {
+    const context = ctx();
+    return String(SillyTavern?.version || context?.version || context?.appVersion || 'unknown');
+  } catch (error) {
+    return String(globalThis.SillyTavern?.version || 'unknown');
+  }
+}
+
+function diagnosticSnapshot(extra = {}) {
+  return {
+    pluginVersion: PLUGIN_VERSION,
+    sillyTavernVersion: sillyTavernVersion(),
+    origin: globalThis.location?.origin || window.location?.origin || 'unknown',
+    localForage: Boolean(globalThis.SillyTavern?.libs?.localforage),
+    indexedDB: typeof indexedDB !== 'undefined' && Boolean(indexedDB),
+    extensionDrawer: selectedDrawerDescription(),
+    storageMode: storageRuntime.mode,
+    storagePhase: storageRuntime.phase,
+    ...extra,
+  };
+}
+
+function logLifecycle(stage, error = null, extra = {}) {
+  const details = diagnosticSnapshot(extra);
+  const label = `[Private Journal v${PLUGIN_VERSION}] ${stage}`;
+  if (error) console.error(label, details, error);
+  else console.info(label, details);
+}
+
+function renderStorageNotice() {
+  const notice = root?.querySelector('.pj-storage-notice');
+  if (!notice) return;
+  const temporary = storageRuntime.mode === 'temporary';
+  notice.hidden = !temporary;
+  notice.textContent = temporary
+    ? `临时会话模式 · 本机不会保存（${storageRuntime.reason || 'IndexedDB 不可用'}）。当前页面仍可使用，请及时导出 JSON 或 Word 备份。`
+    : '';
+  root.classList.toggle('pj-storage-temporary', temporary);
+}
+
+function setStorageRuntime(mode, { reason = '', phase = '', error = null, remoteSaved = storageRuntime.remoteSaved } = {}) {
+  storageRuntime = {
+    ...storageRuntime,
+    mode,
+    reason,
+    phase,
+    lastError: error || null,
+    localForage: Boolean(globalThis.SillyTavern?.libs?.localforage),
+    indexedDB: typeof indexedDB !== 'undefined' && Boolean(indexedDB),
+    remoteSaved: Boolean(remoteSaved),
+  };
+  renderStorageNotice();
+}
+
+function storageFailure(reason, phase, error) {
+  const normalized = error instanceof Error ? error : new Error(String(error || reason));
+  setStorageRuntime('temporary', { reason, phase, error: normalized });
+  logLifecycle(`storage:${phase}`, normalized, { storageReason: reason });
+  return { ok: false, value: null, reason, error: normalized };
+}
+
+function localForageAdapter(method, phase) {
+  const localforage = globalThis.SillyTavern?.libs?.localforage;
+  if (!localforage) return storageFailure('localforage-missing', phase, new Error('SillyTavern.libs.localforage 不存在'));
+  if (typeof indexedDB === 'undefined' || !indexedDB) return storageFailure('indexeddb-missing', phase, new Error('浏览器未提供 IndexedDB'));
+  if (typeof localforage[method] !== 'function') return storageFailure(`${method}-missing`, phase, new Error(`LocalForage.${method} 不存在`));
+  try {
+    const driver = typeof localforage.driver === 'function' ? String(localforage.driver() || '') : '';
+    const localStorageDriver = String(localforage.LOCALSTORAGE || 'localStorageWrapper');
+    if (driver && (driver === localStorageDriver || /localstorage/i.test(driver))) {
+      return storageFailure('localstorage-driver-blocked', phase, new Error('拒绝把大型手札数据回退到 localStorage'));
+    }
+  } catch (error) {
+    return storageFailure('driver-check-failed', phase, error);
+  }
+  return { ok: true, localforage };
+}
+
+function promiseWithTimeout(operation, timeoutMs, phase) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${phase} 超过 ${timeoutMs}ms`);
+      error.code = 'PJ_STORAGE_TIMEOUT';
+      reject(error);
+    }, timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(operation), timeout]).finally(() => clearTimeout(timer));
+}
+
+async function storageRead(key, phase = 'getItem') {
+  const adapter = localForageAdapter('getItem', phase);
+  if (!adapter.ok) return adapter;
+  try {
+    const value = await promiseWithTimeout(() => adapter.localforage.getItem(key), STORAGE_READ_TIMEOUT_MS, phase);
+    setStorageRuntime('persistent', { phase, reason: '' });
+    return { ok: true, value, reason: '' };
+  } catch (error) {
+    return storageFailure(error?.code === 'PJ_STORAGE_TIMEOUT' ? 'timeout' : 'getitem-rejected', phase, error);
+  }
+}
+
+async function storageWrite(key, value, phase = 'setItem') {
+  const adapter = localForageAdapter('setItem', phase);
+  if (!adapter.ok) return adapter;
+  try {
+    const result = await promiseWithTimeout(() => adapter.localforage.setItem(key, value), STORAGE_WRITE_TIMEOUT_MS, phase);
+    setStorageRuntime('persistent', { phase, reason: '' });
+    return { ok: true, value: result, reason: '' };
+  } catch (error) {
+    return storageFailure(error?.code === 'PJ_STORAGE_TIMEOUT' ? 'timeout' : 'setitem-rejected', phase, error);
+  }
+}
+
+async function storageRemove(key, phase = 'removeItem') {
+  const adapter = localForageAdapter('removeItem', phase);
+  if (!adapter.ok) return adapter;
+  try {
+    await promiseWithTimeout(() => adapter.localforage.removeItem(key), STORAGE_WRITE_TIMEOUT_MS, phase);
+    setStorageRuntime('persistent', { phase, reason: '' });
+    return { ok: true, value: null, reason: '' };
+  } catch (error) {
+    return storageFailure(error?.code === 'PJ_STORAGE_TIMEOUT' ? 'timeout' : 'removeitem-rejected', phase, error);
+  }
 }
 
 function escapeHtml(value = '') {
@@ -341,33 +536,55 @@ async function syncBookToChatMetadata(book, key) {
   return true;
 }
 
-async function loadBook() {
+async function loadBook({ source = 'background' } = {}) {
   const targetKey = storageKey();
   const targetLoadRevision = ++bookLoadRevision;
   const startingWriteRevision = bookWriteRevisions.get(targetKey) || 0;
-  const remoteBook = currentChatMetadataBook();
-  const [storedBook, backupBook] = await Promise.all([
-    SillyTavern.libs.localforage.getItem(targetKey),
-    SillyTavern.libs.localforage.getItem(backupStorageKey(targetKey)),
+  logLifecycle('loadBook:start', null, { source, targetKey, targetLoadRevision });
+  let remoteBook = null;
+  try {
+    remoteBook = currentChatMetadataBook();
+  } catch (error) {
+    logLifecycle('loadBook:chat-metadata', error, { source, targetKey });
+  }
+  const [primaryResult, backupResult] = await Promise.all([
+    storageRead(targetKey, 'loadBook:primary'),
+    storageRead(backupStorageKey(targetKey), 'loadBook:backup'),
   ]);
+  const storedBook = primaryResult.ok ? primaryResult.value : null;
+  const backupBook = backupResult.ok ? backupResult.value : null;
   if (
     targetLoadRevision !== bookLoadRevision
     || targetKey !== storageKey()
     || startingWriteRevision !== (bookWriteRevisions.get(targetKey) || 0)
-  ) return false;
+  ) {
+    logLifecycle('loadBook:stale-result-ignored', null, { source, targetKey, targetLoadRevision });
+    return false;
+  }
 
   const loadedBook = mergeStoredBooks(storedBook, backupBook, remoteBook) || blankBook();
-  const primarySnapshot = storedBook ? JSON.stringify(storedBook) : '';
-  migrateBook(loadedBook);
-  const remoteSnapshot = remoteBook ? JSON.stringify(createSyncedBookSnapshot(remoteBook)) : '';
-  const nextRemoteSnapshot = JSON.stringify(createSyncedBookSnapshot(loadedBook));
-  if (!storedBook || primarySnapshot !== JSON.stringify(loadedBook) || remoteSnapshot !== nextRemoteSnapshot) {
-    await saveSpecificBook(loadedBook, targetKey);
+  try {
+    migrateBook(loadedBook);
+  } catch (error) {
+    logLifecycle('loadBook:migrate', error, { source, targetKey });
+    const fallbackBook = blankBook();
+    currentBook = fallbackBook;
+    currentBookStorageKey = targetKey;
+    render();
+    return false;
   }
   if (targetLoadRevision !== bookLoadRevision || targetKey !== storageKey()) return false;
   currentBook = loadedBook;
   currentBookStorageKey = targetKey;
   render();
+  logLifecycle('loadBook:complete', null, {
+    source,
+    targetKey,
+    primaryLoaded: Boolean(storedBook),
+    backupLoaded: Boolean(backupBook),
+    metadataLoaded: Boolean(remoteBook),
+    pageCount: loadedBook.pages.length,
+  });
   return true;
 }
 
@@ -432,26 +649,37 @@ async function saveSpecificBook(book, key) {
   bookWriteRevisions.set(key, (bookWriteRevisions.get(key) || 0) + 1);
   let savedLocally = false;
   let savedRemotely = false;
-  let lastError = null;
-  try {
-    await SillyTavern.libs.localforage.setItem(key, book);
+  const primaryResult = await storageWrite(key, book, 'saveBook:primary');
+  if (primaryResult.ok) {
     savedLocally = true;
-    try {
-      await SillyTavern.libs.localforage.setItem(backupStorageKey(key), book);
-    } catch (error) {
-      console.warn('[Private Journal] Primary journal saved, but the recovery snapshot could not be updated.', error);
+    const backupResult = await storageWrite(backupStorageKey(key), book, 'saveBook:backup');
+    if (!backupResult.ok) {
+      console.warn(`[Private Journal v${PLUGIN_VERSION}] Primary journal saved, but the recovery snapshot could not be updated.`, backupResult.error);
+      setStorageRuntime('persistent', { phase: 'saveBook:primary-only', reason: 'backup-write-failed' });
     }
-  } catch (error) {
-    lastError = error;
-    console.warn('[Private Journal] Local journal storage failed; trying chat metadata sync.', error);
   }
   try {
     savedRemotely = await syncBookToChatMetadata(book, key);
+    if (savedRemotely && !savedLocally) setStorageRuntime('temporary', {
+      reason: storageRuntime.reason || 'indexeddb-unavailable',
+      phase: 'saveBook:metadata-only',
+      error: storageRuntime.lastError,
+      remoteSaved: true,
+    });
   } catch (error) {
-    lastError = error;
-    console.warn('[Private Journal] Journal saved locally, but chat metadata sync failed.', error);
+    logLifecycle('saveBook:chat-metadata', error, { key, savedLocally });
   }
-  if (!savedLocally && !savedRemotely) throw lastError || new Error('手札无法写入本机或聊天元数据');
+  if (!savedLocally && !savedRemotely) {
+    setStorageRuntime('temporary', {
+      reason: storageRuntime.reason || 'all-persistence-failed',
+      phase: 'saveBook:failed',
+      error: storageRuntime.lastError || new Error('手札无法写入本机或聊天元数据'),
+    });
+    safeToastr('warning', '本次修改只保留在当前页面，关闭或刷新后会丢失。请立即导出备份。');
+    setStatus('临时会话：本次修改尚未保存');
+    return false;
+  }
+  return true;
 }
 
 function buildPrompt(type, options = {}) {
@@ -1655,27 +1883,41 @@ function scheduleQuoteCaptureHide(delay = 720) {
 }
 
 function installQuoteCapture() {
-  if (document.querySelector('#private-journal-quote-capture')) return;
+  document.querySelectorAll('#private-journal-quote-capture,[data-private-journal-owned="quote-capture"]')
+    .forEach(element => element.remove());
   const capture = document.createElement('button');
   capture.id = 'private-journal-quote-capture';
+  capture.dataset.privateJournalOwned = 'quote-capture';
+  capture.dataset.privateJournalInstance = INSTANCE_ID;
   capture.type = 'button';
   capture.hidden = true;
   capture.innerHTML = '<span class="pj-quote-capture-preview"></span><strong>收进小纸条</strong>';
   capture.setAttribute('aria-label', '把选中的对白收进小纸条');
-  capture.addEventListener('pointerdown', event => event.preventDefault());
-  capture.addEventListener('click', async event => {
+  const preventSelectionLoss = event => event.preventDefault();
+  const captureClick = async event => {
     event.preventDefault();
     const selected = pendingQuoteSelection;
     if (selected) await saveQuoteNote({ ...selected, source: 'chat-selection' });
-  });
+  };
+  capture.addEventListener('pointerdown', preventSelectionLoss);
+  capture.addEventListener('click', captureClick);
   document.body.append(capture);
-  document.addEventListener('pointerup', event => {
+  const pointerUpHandler = event => {
     if (capture.contains(event.target)) return;
     refreshQuoteCapture(usesMobileQuoteCapture() ? 240 : 0);
-  });
-  document.addEventListener('selectionchange', () => {
+  };
+  const selectionChangeHandler = () => {
     if (window.getSelection?.()?.toString().trim()) refreshQuoteCapture(usesMobileQuoteCapture() ? 180 : 0);
     else scheduleQuoteCaptureHide();
+  };
+  document.addEventListener('pointerup', pointerUpHandler);
+  document.addEventListener('selectionchange', selectionChangeHandler);
+  registerCleanup(() => {
+    document.removeEventListener('pointerup', pointerUpHandler);
+    document.removeEventListener('selectionchange', selectionChangeHandler);
+    capture.removeEventListener('pointerdown', preventSelectionLoss);
+    capture.removeEventListener('click', captureClick);
+    capture.remove();
   });
 }
 
@@ -2066,6 +2308,7 @@ function render() {
   const generateButton = root.querySelector('[data-action="generate"]');
   if (generateButton && activeType === 'romance_diary' && !isRomanceUnlocked()) generateButton.disabled = true;
   renderAccessories();
+  renderStorageNotice();
   setStatus(lastStatus);
 }
 
@@ -2247,27 +2490,50 @@ function bind() {
 }
 
 async function openJournal() {
-  if (!root) return;
-  bookOpen = false;
-  resetMobilePan();
+  if (!root?.isConnected) {
+    const error = new Error('手札界面尚未完成初始化');
+    logLifecycle('openJournal:root-missing', error);
+    safeToastr('error', '私语手札尚未完成初始化，请刷新页面后重试。');
+    return false;
+  }
+  // This must remain the first user-visible operation. Storage is deliberately background-only.
   root.classList.add('open');
   const launcher = document.querySelector('#private-journal-launcher');
   if (launcher) launcher.hidden = true;
+  bookOpen = false;
+  resetMobilePan();
+  currentBook ||= blankBook();
+  currentBookStorageKey ||= storageKey();
   root.classList.add('pj-loading');
   root.setAttribute('aria-busy', 'true');
-  renderAccessories();
-  try {
-    await loadBook();
-  } catch (error) {
-    console.error('[Private Journal] Unable to load the journal database.', error);
-    currentBook ||= blankBook();
-    currentBookStorageKey ||= storageKey();
+  try { render(); } catch (error) { logLifecycle('openJournal:initial-render', error); }
+  void startBookLoad('open').catch(error => {
+    logLifecycle('openJournal:background-load', error);
     render();
-    toastr.warning('本机存储读取较慢或暂不可用，已先打开手札；请稍后重试。', '私语手札');
-  } finally {
+    safeToastr('warning', '本机存储暂不可用，手札已进入临时会话模式。');
+  }).finally(() => {
     root.classList.remove('pj-loading');
     root.removeAttribute('aria-busy');
-  }
+    renderStorageNotice();
+  });
+  return true;
+}
+
+function startBookLoad(source = 'background') {
+  let key;
+  try { key = storageKey(); } catch (error) { return Promise.reject(error); }
+  if (pendingBookLoad && pendingBookLoadKey === key) return pendingBookLoad;
+  const promise = loadBook({ source });
+  pendingBookLoad = promise;
+  pendingBookLoadKey = key;
+  const releasePendingLoad = () => {
+    if (pendingBookLoad === promise) {
+      pendingBookLoad = null;
+      pendingBookLoadKey = null;
+    }
+  };
+  promise.then(releasePendingLoad, releasePendingLoad);
+  return promise;
 }
 
 function applyMobilePan() {
@@ -2290,7 +2556,7 @@ function makeJournalStagePannable() {
     if (!mobile() || !bookOpen || event.button !== 0) return;
     if (event.target.closest('button,input,textarea,select,label,summary,.pj-pages,.pj-controls,footer,nav')) return;
     drag = { id: event.pointerId, x: event.clientX, y: event.clientY, originX: mobilePan.x, originY: mobilePan.y };
-    scene.setPointerCapture?.(event.pointerId);
+    try { scene.setPointerCapture?.(event.pointerId); } catch (error) { /* Mobile WebKit may cancel capture during viewport gestures. */ }
     root.classList.add('mobile-panning');
   });
   scene.addEventListener('pointermove', event => {
@@ -2305,13 +2571,14 @@ function makeJournalStagePannable() {
   });
   const finish = event => {
     if (!drag || drag.id !== event.pointerId) return;
-    scene.releasePointerCapture?.(event.pointerId);
+    try { scene.releasePointerCapture?.(event.pointerId); } catch (error) { /* Pointer may already be released. */ }
     drag = null;
     root.classList.remove('mobile-panning');
   };
   scene.addEventListener('pointerup', finish);
   scene.addEventListener('pointercancel', finish);
   window.addEventListener('resize', resetMobilePan);
+  registerCleanup(() => window.removeEventListener('resize', resetMobilePan));
 }
 
 function applyLauncherPosition(launcher) {
@@ -2376,62 +2643,164 @@ function makeLauncherDraggable(launcher) {
       event.stopImmediatePropagation();
     }
   }, true);
-  window.addEventListener('resize', () => applyLauncherPosition(launcher));
+  const repositionLauncher = () => applyLauncherPosition(launcher);
+  window.addEventListener('resize', repositionLauncher);
+  registerCleanup(() => window.removeEventListener('resize', repositionLauncher));
   requestAnimationFrame(() => applyLauncherPosition(launcher));
 }
 
 function installWandMenuEntry() {
-  if (document.querySelector('#private-journal-wand-entry')) return true;
-  const menu = document.querySelector('#extensionsMenu,.extensionsMenu,[data-extension-menu]');
+  const menus = [...document.querySelectorAll('#extensionsMenu,.extensionsMenu,[data-extension-menu]')];
+  const visibleMenus = menus.filter(isElementActuallyVisible);
+  const menu = visibleMenus[0] || menus[0];
   if (!menu) return false;
-  const entry = document.createElement('div');
+  const candidates = [...document.querySelectorAll('#private-journal-wand-entry,[data-private-journal-entry="wand"]')];
+  let entry = candidates.find(element => element.parentElement === menu && element.dataset.privateJournalInstance === INSTANCE_ID);
+  for (const candidate of candidates) if (candidate !== entry) candidate.remove();
+  if (entry) return true;
+  entry = document.createElement('div');
   entry.id = 'private-journal-wand-entry';
   entry.className = 'list-group-item flex-container flexGap5';
+  entry.dataset.privateJournalEntry = 'wand';
+  entry.dataset.privateJournalInstance = INSTANCE_ID;
   entry.innerHTML = '<div class="fa-solid fa-book-open extensionsMenuExtensionButton"></div><span>私语手札</span>';
-  entry.addEventListener('click', openJournal);
+  entry.addEventListener('click', event => {
+    event.preventDefault();
+    void openJournal();
+  });
   menu.append(entry);
-  const wand = document.querySelector('#extensionsMenuButton');
-  if (wand) wand.style.display = '';
   return true;
 }
 
 function installExtensionDrawerEntry() {
-  if (document.querySelector('#private-journal-extension-entry')) return true;
-  const extensionsDrawer = document.querySelector('#extensions_settings2,#extensions_settings');
+  const extensionsDrawer = selectExtensionDrawerContainer();
   if (!extensionsDrawer) return false;
-  const entry = document.createElement('div');
+  const candidates = [...document.querySelectorAll('#private-journal-extension-entry,[data-private-journal-entry="drawer"]')];
+  let entry = candidates.find(element => element.parentElement === extensionsDrawer && element.dataset.privateJournalInstance === INSTANCE_ID);
+  for (const candidate of candidates) if (candidate !== entry) candidate.remove();
+  if (entry) return true;
+  entry = document.createElement('div');
   entry.id = 'private-journal-extension-entry';
   entry.className = 'extension_container pj-extension-entry';
+  entry.dataset.privateJournalEntry = 'drawer';
+  entry.dataset.privateJournalInstance = INSTANCE_ID;
   entry.innerHTML = `<button type="button" class="menu_button pj-extension-open-button" aria-label="打开私语手札">
     <span class="fa-solid fa-book-open" aria-hidden="true"></span>
     <span class="pj-extension-entry-copy"><strong>私语手札</strong><small>打开当前聊天的私人手札</small></span>
     <span class="fa-solid fa-chevron-right" aria-hidden="true"></span>
   </button>`;
-  entry.querySelector('button')?.addEventListener('click', openJournal);
+  entry.querySelector('button')?.addEventListener('click', event => {
+    event.preventDefault();
+    void openJournal();
+  });
   extensionsDrawer.prepend(entry);
   return true;
+}
+
+function unbindWandButton() {
+  if (boundWandButton && boundWandButtonHandler) boundWandButton.removeEventListener('click', boundWandButtonHandler);
+  boundWandButton = null;
+  boundWandButtonHandler = null;
+}
+
+function bindCurrentWandButton() {
+  const wand = document.querySelector('#extensionsMenuButton');
+  if (wand === boundWandButton) return;
+  unbindWandButton();
+  if (!wand) return;
+  boundWandButton = wand;
+  boundWandButtonHandler = () => queueJournalMenuEntries();
+  wand.addEventListener('click', boundWandButtonHandler);
+  wand.style.display = '';
 }
 
 function installJournalMenuEntries() {
   installWandMenuEntry();
   installExtensionDrawerEntry();
+  bindCurrentWandButton();
+}
+
+function queueJournalMenuEntries() {
+  if (menuInstallFrame !== null) return;
+  const schedule = window.requestAnimationFrame || (callback => setTimeout(callback, 0));
+  menuInstallFrame = schedule(() => {
+    menuInstallFrame = null;
+    installJournalMenuEntries();
+  });
 }
 
 function watchWandMenuEntry() {
   installJournalMenuEntries();
   if (wandMenuObserver || typeof MutationObserver !== 'function') return;
-  wandMenuObserver = new MutationObserver(() => installJournalMenuEntries());
-  wandMenuObserver.observe(document.body, { childList: true, subtree: true });
-  const wand = document.querySelector('#extensionsMenuButton');
-  wand?.addEventListener('click', () => requestAnimationFrame(installJournalMenuEntries));
+  wandMenuObserver = new MutationObserver(() => queueJournalMenuEntries());
+  wandMenuObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
+  });
+}
+
+function bindContextEvent(eventSource, eventName, handler) {
+  if (!eventName || typeof eventSource?.on !== 'function') return;
+  eventSource.on(eventName, handler);
+  registerCleanup(() => {
+    if (typeof eventSource.off === 'function') eventSource.off(eventName, handler);
+    else if (typeof eventSource.removeListener === 'function') eventSource.removeListener(eventName, handler);
+  });
+}
+
+function removeJournalDomArtifacts() {
+  document.querySelectorAll([
+    '#private-journal',
+    '#private-journal-launcher',
+    '#private-journal-quote-capture',
+    '#private-journal-wand-entry',
+    '#private-journal-extension-entry',
+    '[data-private-journal-owned]',
+    '[data-private-journal-entry]',
+  ].join(',')).forEach(element => element.remove());
+}
+
+function cleanupPluginInstance() {
+  initializationRevision += 1;
+  bookLoadRevision += 1;
+  clearTimeout(autoGenerationTimer);
+  clearTimeout(pageTurnTimer);
+  clearTimeout(pageTurnSwapTimer);
+  clearTimeout(quoteSelectionRefreshTimer);
+  clearTimeout(quoteSelectionHideTimer);
+  if (menuInstallFrame !== null) {
+    const cancel = window.cancelAnimationFrame || clearTimeout;
+    cancel(menuInstallFrame);
+    menuInstallFrame = null;
+  }
+  wandMenuObserver?.disconnect?.();
+  wandMenuObserver = null;
+  unbindWandButton();
+  for (const cleanup of lifecycleCleanups.splice(0).reverse()) {
+    try { cleanup(); } catch (error) { console.warn(`[Private Journal v${PLUGIN_VERSION}] cleanup failed`, error); }
+  }
+  removeJournalDomArtifacts();
+  pendingBookLoad = null;
+  pendingBookLoadKey = null;
+  root = null;
 }
 
 async function initialize() {
-  getSettings();
-  root = document.createElement('section');
-  root.id = 'private-journal';
-  root.lang = getSettings().language || 'zh-CN';
-  root.innerHTML = `<div class="pj-backdrop" data-action="close"><img class="pj-desk-art" src="${escapeHtml(deskAssetUrl(getSettings().desk))}" alt="" draggable="false"></div><div class="pj-scene">
+  cleanupPluginInstance();
+  const thisInitialization = ++initializationRevision;
+  try {
+    logLifecycle('initialize:start');
+    const settings = getSettings();
+    root = document.createElement('section');
+    root.id = 'private-journal';
+    root.dataset.privateJournalOwned = 'root';
+    root.dataset.privateJournalInstance = INSTANCE_ID;
+    root.dataset.pluginVersion = PLUGIN_VERSION;
+    root.lang = settings.language || 'zh-CN';
+    root.innerHTML = `<div class="pj-backdrop" data-action="close"><img class="pj-desk-art" src="${escapeHtml(deskAssetUrl(settings.desk))}" alt="" draggable="false"></div><div class="pj-scene">
+    <div class="pj-storage-notice" role="alert" aria-live="assertive" hidden></div>
     <button class="pj-scene-close" data-action="close" aria-label="关闭私语手札" title="关闭">×</button>
     <div class="pj-book-stage">
       <button class="pj-cover" data-action="toggle-book" aria-label="翻开或合上手札">
@@ -2443,7 +2812,7 @@ async function initialize() {
         <div class="pj-page-turner" aria-hidden="true"></div>
         <nav><h1 class="pj-title"></h1><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
         <div class="pj-tabs" role="tablist" aria-label="书签目录"></div><div class="pj-controls"></div><main class="pj-pages"></main>
-        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><div class="pj-api-router-host"></div><span class="pj-status"></span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
+        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><div class="pj-api-router-host"></div><span class="pj-status"></span><span class="pj-runtime-version">v${PLUGIN_VERSION}</span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
       </div>
     </div>
     <div class="pj-style-palette" aria-label="选择手札装帧">
@@ -2451,48 +2820,97 @@ async function initialize() {
       <div class="pj-style-row"><span class="pj-style-label">桌面</span><div class="pj-desk-switcher" role="group" aria-label="选择桌面背景"></div></div>
     </div>
   </div>`;
-  document.body.append(root);
-  bind();
-  makeJournalStagePannable();
-  installQuoteCapture();
+    document.body.append(root);
+    currentBook = blankBook();
+    currentBookStorageKey = storageKey();
+    bind();
+    makeJournalStagePannable();
+    installQuoteCapture();
 
-  const launcher = document.createElement('button');
-  launcher.id = 'private-journal-launcher';
-  launcher.title = '打开私语手札';
-  launcher.textContent = '❦';
-  makeLauncherDraggable(launcher);
-  launcher.addEventListener('click', openJournal);
-  document.body.append(launcher);
-  watchWandMenuEntry();
+    const launcher = document.createElement('button');
+    launcher.id = 'private-journal-launcher';
+    launcher.dataset.privateJournalOwned = 'launcher';
+    launcher.dataset.privateJournalInstance = INSTANCE_ID;
+    launcher.title = `打开私语手札 v${PLUGIN_VERSION}`;
+    launcher.textContent = '❦';
+    makeLauncherDraggable(launcher);
+    launcher.addEventListener('click', () => void openJournal());
+    document.body.append(launcher);
+    watchWandMenuEntry();
+    render();
 
-  const context = ctx();
-  const chatChanged = context.eventTypes?.CHAT_CHANGED;
-  if (chatChanged) context.eventSource.on(chatChanged, loadBook);
-  const generationStarted = context.eventTypes?.GENERATION_STARTED;
-  const generationEnded = context.eventTypes?.GENERATION_ENDED;
-  const characterRendered = context.eventTypes?.CHARACTER_MESSAGE_RENDERED;
-  if (generationStarted) context.eventSource.on(generationStarted, () => {
-    if (!journalGenerationActive && !relationshipCheckActive) {
-      mainGenerationActive = true;
-      mainGenerationCycleSeen = true;
-      mainGenerationStartSignature = latestAssistantSignature();
-      autoGenerationRetries = 0;
-      setStatus('正文生成中…');
-    }
-  });
-  if (generationEnded) context.eventSource.on(generationEnded, () => {
-    if (!journalGenerationActive && !relationshipCheckActive) {
-      mainGenerationActive = false;
-      scheduleAutoGeneration();
-    }
-  });
-  if (characterRendered) context.eventSource.on(characterRendered, () => {
-    if (mainGenerationCycleSeen) scheduleAutoGeneration();
-  });
-  await loadBook();
-  console.log('[Private Journal] loaded');
+    const context = ctx();
+    const eventSource = context.eventSource;
+    bindContextEvent(eventSource, context.eventTypes?.CHAT_CHANGED, () => {
+      currentBook = blankBook();
+      currentBookStorageKey = storageKey();
+      render();
+      void startBookLoad('chat-change').catch(error => logLifecycle('chat-change:load', error));
+    });
+    bindContextEvent(eventSource, context.eventTypes?.GENERATION_STARTED, () => {
+      if (!journalGenerationActive && !relationshipCheckActive) {
+        mainGenerationActive = true;
+        mainGenerationCycleSeen = true;
+        mainGenerationStartSignature = latestAssistantSignature();
+        autoGenerationRetries = 0;
+        setStatus('正文生成中…');
+      }
+    });
+    bindContextEvent(eventSource, context.eventTypes?.GENERATION_ENDED, () => {
+      if (!journalGenerationActive && !relationshipCheckActive) {
+        mainGenerationActive = false;
+        scheduleAutoGeneration();
+      }
+    });
+    bindContextEvent(eventSource, context.eventTypes?.CHARACTER_MESSAGE_RENDERED, () => {
+      if (mainGenerationCycleSeen) scheduleAutoGeneration();
+    });
+    if (thisInitialization !== initializationRevision) return false;
+    void startBookLoad('initialize').catch(error => {
+      logLifecycle('initialize:background-load', error);
+      setStorageRuntime('temporary', { reason: 'background-load-failed', phase: 'initialize', error });
+    });
+    logLifecycle('initialize:ready', null, { instanceId: INSTANCE_ID });
+    return true;
+  } catch (error) {
+    logLifecycle('initialize:failed', error);
+    safeToastr('error', `私语手札 v${PLUGIN_VERSION} 初始化失败：${error?.message || error}`);
+    cleanupPluginInstance();
+    return false;
+  }
 }
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialize, { once: true });
-else initialize();
+const previousRuntime = window[RUNTIME_KEY];
+if (previousRuntime && previousRuntime.instanceId !== INSTANCE_ID) {
+  try { previousRuntime.dispose?.(); } catch (error) { console.warn(`[Private Journal v${PLUGIN_VERSION}] stale runtime cleanup failed`, error); }
+}
+window[RUNTIME_KEY] = {
+  version: PLUGIN_VERSION,
+  instanceId: INSTANCE_ID,
+  openJournal: () => openJournal(),
+  initialize: () => initialize(),
+  dispose: () => cleanupPluginInstance(),
+  diagnostics: () => diagnosticSnapshot(),
+  ...(window.__PRIVATE_JOURNAL_TEST_CONFIG__ ? {
+    test: {
+      setCalendarAndSave: async (dateKey, emoji) => {
+        setCalendarEntry(currentBook, dateKey, emoji);
+        return saveBook();
+      },
+    },
+  } : {}),
+};
+
+const startInitialization = () => {
+  void initialize().catch(error => {
+    logLifecycle('initialize:top-level-catch', error);
+    safeToastr('error', `私语手札 v${PLUGIN_VERSION} 无法启动：${error?.message || error}`);
+  });
+};
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', startInitialization, { once: true });
+  registerCleanup(() => document.removeEventListener('DOMContentLoaded', startInitialization));
+} else startInitialization();
+
+})();
 

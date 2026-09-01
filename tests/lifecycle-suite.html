@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>私语手札生命周期自动化测试</title>
+  <style>
+    body{margin:0;padding:24px;color:#2f2825;background:#f4ecdf;font:14px/1.6 system-ui,sans-serif}
+    h1{font-size:20px}.pass{color:#176a3a}.fail{color:#a32626}li{margin:5px 0}iframe{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none}
+  </style>
+</head>
+<body>
+  <h1>私语手札生命周期自动化测试</h1>
+  <p id="summary">运行中…</p>
+  <ol id="results"></ol>
+  <script>
+    const results = [];
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+    const record = (name, error = null) => {
+      results.push({ name, pass: !error, error: error?.message || '' });
+      const item = document.createElement('li');
+      item.className = error ? 'fail' : 'pass';
+      item.textContent = error ? `${name}：${error.message}` : `${name}：通过`;
+      document.querySelector('#results').append(item);
+    };
+    async function withHarness(query, callback) {
+      const frame = document.createElement('iframe');
+      frame.src = `./lifecycle-harness.html?${query}`;
+      document.body.append(frame);
+      await new Promise((resolve, reject) => {
+        frame.addEventListener('load', resolve, { once: true });
+        setTimeout(() => reject(new Error(`测试页加载超时：${query}`)), 3000);
+      });
+      const api = frame.contentWindow.__PJ_TEST__;
+      assert(api, '生命周期测试 API 未就绪');
+      await api.settle(140);
+      try { return await callback(frame.contentWindow, api); }
+      finally {
+        frame.contentWindow.__stPrivateJournalRuntime?.dispose?.();
+        frame.remove();
+      }
+    }
+    async function test(name, query, callback) {
+      try { await withHarness(query, callback); record(name); }
+      catch (error) { record(name, error); }
+    }
+
+    (async () => {
+      await test('LocalForage 完全不存在', 'storage=missing&drawers=settings2', async (win, api) => {
+        const state = api.state();
+        assert(state.temporary && /本机不会保存/.test(state.notice), '未进入醒目的临时会话模式');
+      });
+      await test('getItem reject', 'storage=reject-read&drawers=settings2', async (win, api) => {
+        const state = api.state();
+        assert(state.temporary && state.diagnostics.storagePhase.includes('loadBook'), '读取拒绝未被适配层捕获');
+      });
+      await test('setItem reject', 'storage=reject-write&drawers=settings2', async (win, api) => {
+        await win.__stPrivateJournalRuntime.test.setCalendarAndSave('2026-09-01', '🌷');
+        const state = api.state();
+        assert(state.temporary && /setitem-rejected/.test(state.notice), '写入拒绝后未显示不可保存提示');
+        assert(state.modelCalls === 0, '保存月历不应调用模型');
+      });
+      await test('getItem 永久 pending 超时', 'storage=pending&drawers=settings2', async (win, api) => {
+        const state = api.state();
+        assert(state.temporary && /timeout/.test(state.notice), '永久 pending 未进入超时降级');
+      });
+      await test('pending 时 100ms 内显示外框', 'storage=pending&drawers=settings2', async (win, api) => {
+        const started = win.performance.now();
+        win.document.querySelector('#private-journal-launcher').click();
+        const elapsed = win.performance.now() - started;
+        assert(api.state().open && elapsed < 100, `外框显示耗时 ${elapsed.toFixed(1)}ms`);
+        assert(api.state().modelCalls === 0, '打开手札不应调用模型');
+      });
+      await test('只有 #extensions_settings', 'storage=normal&drawers=settings', async (win, api) => {
+        assert(api.state().drawerParent === 'extensions_settings', '入口未挂载到旧抽屉');
+      });
+      await test('只有 #extensions_settings2', 'storage=normal&drawers=settings2', async (win, api) => {
+        assert(api.state().drawerParent === 'extensions_settings2', '入口未挂载到新抽屉');
+      });
+      await test('第一个隐藏、第二个可见', 'storage=normal&drawers=both-hidden-first', async (win, api) => {
+        assert(api.state().drawerParent === 'extensions_settings2', '入口挂载到了隐藏抽屉');
+      });
+      await test('抽屉删除后重建', 'storage=normal&drawers=settings2', async (win, api) => {
+        const state = await api.rebuildDrawer('extensions_settings');
+        assert(state.drawerEntries === 1 && state.drawerParent === 'extensions_settings', '入口未自动迁移到重建抽屉');
+      });
+      await test('替换旧失效 handler', 'storage=normal&drawers=settings2&stale=1', async (win, api) => {
+        win.document.querySelector('#private-journal-wand-entry').click();
+        const state = api.state();
+        assert(state.open && state.staleClicks === 0, '仍在调用旧入口闭包');
+      });
+      await test('initialize 连续两次幂等', 'storage=normal&drawers=settings2', async (win, api) => {
+        const state = await api.reinitializeTwice();
+        assert(state.roots === 1 && state.launchers === 1 && state.captures === 1, '初始化产生重复主节点');
+        assert(state.drawerEntries === 1 && state.wandEntries === 1, '初始化产生重复入口');
+      });
+      await test('脚本热更新重新注入', 'storage=normal&drawers=settings2', async (win, api) => {
+        const result = await api.reinjectScript();
+        assert(result.previousInstance !== result.currentInstance, '运行时实例没有被替换');
+        assert(result.state.roots === 1 && result.state.launchers === 1 && result.state.captures === 1, '重新注入后存在重复节点');
+        assert(result.state.drawerEntries === 1 && result.state.wandEntries === 1, '重新注入后存在重复入口');
+      });
+
+      const failed = results.filter(result => !result.pass);
+      window.__PJ_SUITE__ = { done: true, passed: results.length - failed.length, failed: failed.length, results };
+      const summary = document.querySelector('#summary');
+      summary.className = failed.length ? 'fail' : 'pass';
+      summary.textContent = failed.length ? `${failed.length} 项失败` : `${results.length} 项全部通过`;
+      document.title = failed.length ? 'FAIL · 私语手札生命周期测试' : 'PASS · 私语手札生命周期测试';
+    })().catch(error => {
+      window.__PJ_SUITE__ = { done: true, passed: 0, failed: 1, results, fatal: error.message };
+      document.querySelector('#summary').textContent = `测试中断：${error.message}`;
+      document.title = 'FAIL · 私语手札生命周期测试';
+    });
+  </script>
+</body>
+</html>

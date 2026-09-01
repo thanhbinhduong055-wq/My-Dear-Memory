@@ -41,6 +41,7 @@
 #private-journal [hidden] { display:none!important; }
 #private-journal.pj-loading .pj-cover { cursor:progress; }
 #private-journal.pj-loading .pj-cover-hint::after { content:" · 正在读取"; }
+.pj-storage-notice { position:fixed; top:max(14px,env(safe-area-inset-top)); left:50%; z-index:12; width:min(620px,calc(100vw - 28px)); padding:10px 14px; border:1px solid rgba(133,63,50,.38); border-radius:8px; color:#6f2f28; background:rgba(255,244,220,.96); box-shadow:0 10px 30px rgba(60,31,23,.2); transform:translateX(-50%); font:600 12px/1.55 var(--pj-font-ui); text-align:center; }
 
 #private-journal[data-theme="botanical-noir"] {
   --pj-cover-image:url('./assets/themes/cutouts/botanical-noir.webp');
@@ -595,6 +596,7 @@
 .pj-footer-state input { accent-color:var(--pj-accent); }
 #private-journal[data-active-type="calendar"] .pj-footer-state>label { display:none; }
 .pj-status { max-width:250px; overflow:hidden; color:#78685d; font:12px/1.4 var(--pj-font-ui); text-overflow:ellipsis; white-space:nowrap; }
+.pj-runtime-version { color:#8c796b; font:10px/1.4 var(--pj-font-ui); opacity:.7; white-space:nowrap; }
 .pj-primary { color:#fff8e8!important; background:var(--pj-accent)!important; }
 .pj-secondary { border:1px solid #856d4e77!important; }
 

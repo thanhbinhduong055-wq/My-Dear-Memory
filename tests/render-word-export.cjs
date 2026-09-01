@@ -4,6 +4,9 @@ const vm = require('node:vm');
 
 const outputPath = path.resolve(process.argv[2] || path.join('.qa', 'word-export-sample.docx'));
 const source = fs.readFileSync(path.resolve(__dirname, '..', 'index.js'), 'utf8');
+const executableSource = source
+  .replace(/^\(\(\) => \{\r?\n'use strict';\r?\n/, '')
+  .replace(/\r?\n\}\)\(\);\s*$/, '');
 const sampleBook = {
   version: 7,
   userName: '姜藏',
@@ -61,7 +64,7 @@ const sandbox = {
 };
 
 vm.createContext(sandbox);
-vm.runInContext(source, sandbox, { filename: 'index.js' });
+vm.runInContext(executableSource, sandbox, { filename: 'index.js' });
 const bytes = vm.runInContext('createStoredZip(buildWordDocumentParts(sampleBook))', sandbox);
 fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 fs.writeFileSync(outputPath, Buffer.from(bytes));

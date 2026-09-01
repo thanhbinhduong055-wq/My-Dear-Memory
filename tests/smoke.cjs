@@ -3,7 +3,11 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(require.resolve('../index.js'), 'utf8');
+const executableSource = source
+  .replace(/^\(\(\) => \{\r?\n'use strict';\r?\n/, '')
+  .replace(/\r?\n\}\)\(\);\s*$/, '');
 const styleSource = fs.readFileSync(require.resolve('../style.css'), 'utf8');
+const manifest = JSON.parse(fs.readFileSync(require.resolve('../manifest.json'), 'utf8'));
 const contextValue = {
   uuidv4: undefined,
   extensionSettings: {},
@@ -21,10 +25,13 @@ const sandbox = {
   console,
   setTimeout,
   clearTimeout,
-  window: { crypto: {} },
+  window: { crypto: {}, __PRIVATE_JOURNAL_TEST_CONFIG__: { storageTimeoutMs: 30 } },
+  indexedDB: {},
   document: {
     readyState: 'loading',
     addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
   },
   SillyTavern: {
     getContext: () => contextValue,
@@ -43,7 +50,7 @@ const sandbox = {
 };
 
 vm.createContext(sandbox);
-vm.runInContext(source, sandbox, { filename: 'index.js' });
+vm.runInContext(executableSource, sandbox, { filename: 'index.js' });
 
 assert.equal(vm.runInContext('Object.keys(THEMES).length', sandbox), 5);
 assert.equal(vm.runInContext('Object.keys(DESKS).length', sandbox), 5);
@@ -53,6 +60,7 @@ assert.equal(vm.runInContext('DEFAULTS.generationApiMode', sandbox), 'main');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
 assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
+assert.equal(manifest.version, '0.19.0');
 assert.equal(vm.runInContext("PAGE_TYPES.calendar.label", sandbox), '心情月历');
 for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-marble', 'magnolia-swallow']) {
   assert.match(styleSource, new RegExp(`assets/themes/cutouts/${theme}\\.webp`));
@@ -80,7 +88,12 @@ assert.match(source, /ConnectionManagerRequestService/);
 assert.match(source, /aria-label="书签目录"/);
 assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
-assert.match(source, /#extensions_settings2,#extensions_settings/);
+assert.match(source, /#extensions_settings,#extensions_settings2/);
+assert.match(source, /selectExtensionDrawerContainer/);
+assert.match(source, /PLUGIN_VERSION = '0\.19\.0'/);
+assert.match(source, /privateJournalInstance/);
+assert.match(source, /initialize:failed/);
+assert.match(source, /safeToastr\('error', `私语手札 v\$\{PLUGIN_VERSION\} 初始化失败/);
 assert.match(source, /private-journal-extension-entry/);
 assert.match(source, /pj-quote-capture-preview/);
 assert.match(styleSource, /\.pj-extension-open-button/);
@@ -90,12 +103,17 @@ assert.match(styleSource, /#private-journal-launcher[^}]*touch-action:none/);
 assert.match(styleSource, /pj-reader-out-forward/);
 assert.match(styleSource, /pj-reader-in-forward/);
 const openJournalStart = source.indexOf('async function openJournal()');
-const openJournalEnd = source.indexOf('\n}', openJournalStart);
+const openJournalEnd = source.indexOf('\nfunction startBookLoad', openJournalStart);
 const openJournalSource = source.slice(openJournalStart, openJournalEnd);
 assert.ok(
-  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf('await loadBook()'),
+  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("startBookLoad('open')"),
   '移动端点击后必须先显示手札，再等待 IndexedDB 加载',
 );
+assert.doesNotMatch(openJournalSource, /await\s+(?:loadBook|storageRead|storageWrite)/);
+assert.doesNotMatch(openJournalSource, /generateQuietPrompt|callJournalApi|callCurrentMainApi|fetch\s*\(/, '打开手札不得触发任何模型 API');
+const loadBookStart = source.indexOf('async function loadBook(');
+const loadBookEnd = source.indexOf('\nfunction migrateBook', loadBookStart);
+assert.doesNotMatch(source.slice(loadBookStart, loadBookEnd), /saveSpecificBook|storageWrite/, '读取或打开空手札不得强制写数据库');
 assert.equal(vm.runInContext("launcherDragThreshold('touch')", sandbox), 14);
 assert.equal(vm.runInContext("launcherDragThreshold('mouse')", sandbox), 5);
 
@@ -371,6 +389,82 @@ assert.equal(monthDecision.period.isExtended, true);
 assert.match(monthDecision.period.label, /2025年1月1日/);
 
 (async () => {
+  const originalLocalForage = sandbox.SillyTavern.libs.localforage;
+
+  delete sandbox.SillyTavern.libs.localforage;
+  const missingStorage = await vm.runInContext(`storageRead('missing-key', 'test:missing')`, sandbox);
+  assert.equal(missingStorage.ok, false, 'LocalForage 不存在时读取必须可恢复');
+  assert.equal(missingStorage.reason, 'localforage-missing');
+  assert.equal(vm.runInContext('storageRuntime.mode', sandbox), 'temporary');
+
+  sandbox.SillyTavern.libs.localforage = originalLocalForage;
+  sandbox.indexedDB = null;
+  const missingIndexedDb = await vm.runInContext(`storageRead('missing-idb', 'test:indexeddb-missing')`, sandbox);
+  assert.equal(missingIndexedDb.reason, 'indexeddb-missing');
+  sandbox.indexedDB = {};
+
+  sandbox.SillyTavern.libs.localforage = {
+    getItem: async () => { throw new Error('read rejected'); },
+    setItem: async () => undefined,
+    removeItem: async () => undefined,
+  };
+  const rejectedRead = await vm.runInContext(`storageRead('reject-key', 'test:reject')`, sandbox);
+  assert.equal(rejectedRead.ok, false, 'getItem reject 不得逃逸为未处理异常');
+  assert.match(rejectedRead.error.message, /read rejected/);
+
+  sandbox.SillyTavern.libs.localforage = {
+    getItem: async () => null,
+    setItem: async () => { throw new Error('write rejected'); },
+    removeItem: async () => { throw new Error('remove rejected'); },
+  };
+  const rejectedWrite = await vm.runInContext(`storageWrite('reject-key', { pages: [] }, 'test:set-reject')`, sandbox);
+  assert.equal(rejectedWrite.ok, false, 'setItem reject 必须进入临时会话模式');
+  const rejectedRemove = await vm.runInContext(`storageRemove('reject-key', 'test:remove-reject')`, sandbox);
+  assert.equal(rejectedRemove.ok, false, 'removeItem reject 必须被统一适配层捕获');
+
+  sandbox.SillyTavern.libs.localforage = {
+    LOCALSTORAGE: 'localStorageWrapper',
+    driver: () => 'localStorageWrapper',
+    getItem: async () => null,
+    setItem: async () => undefined,
+    removeItem: async () => undefined,
+  };
+  const blockedFallback = await vm.runInContext(`storageRead('large-book', 'test:localstorage-fallback')`, sandbox);
+  assert.equal(blockedFallback.reason, 'localstorage-driver-blocked', '不得静默回退到 localStorage 保存大型 Base64 数据');
+
+  sandbox.SillyTavern.libs.localforage = {
+    getItem: async () => new Promise(() => {}),
+    setItem: async () => undefined,
+    removeItem: async () => undefined,
+  };
+  const pendingStartedAt = Date.now();
+  const timedOutRead = await vm.runInContext(`storageRead('pending-key', 'test:timeout')`, sandbox);
+  assert.equal(timedOutRead.ok, false, '永久 pending 的读取必须超时');
+  assert.equal(timedOutRead.reason, 'timeout');
+  assert.ok(Date.now() - pendingStartedAt < 500, '测试超时配置应在 500ms 内返回');
+
+  sandbox.drawerCandidates = [];
+  sandbox.document.querySelectorAll = selector => selector.includes('extensions_settings') ? sandbox.drawerCandidates : [];
+  sandbox.window.getComputedStyle = element => ({
+    display: element.display || 'block',
+    visibility: element.visibility || 'visible',
+  });
+  const drawer = (id, display = 'block') => ({
+    id,
+    display,
+    hidden: false,
+    isConnected: true,
+    parentElement: null,
+    getAttribute: () => null,
+  });
+  sandbox.drawerCandidates = [drawer('extensions_settings')];
+  assert.equal(vm.runInContext('selectExtensionDrawerContainer()?.id', sandbox), 'extensions_settings');
+  sandbox.drawerCandidates = [drawer('extensions_settings2')];
+  assert.equal(vm.runInContext('selectExtensionDrawerContainer()?.id', sandbox), 'extensions_settings2');
+  sandbox.drawerCandidates = [drawer('extensions_settings', 'none'), drawer('extensions_settings2', 'block')];
+  assert.equal(vm.runInContext('selectExtensionDrawerContainer()?.id', sandbox), 'extensions_settings2', '必须选择真实可见的新抽屉');
+
+  sandbox.SillyTavern.libs.localforage = originalLocalForage;
   let metadataSaveCalls = 0;
   const remoteOnlyBook = JSON.parse(JSON.stringify(vm.runInContext('blankBook()', sandbox)));
   remoteOnlyBook.pages = [{ id: 'remote-diary', type: 'daily_note', title: '另一台设备的日记', body: '应该随聊天回来。' }];
@@ -559,14 +653,18 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   );
   assert.deepEqual(
     storedBooks.get(recoveryKey).pages.map(page => page.id).sort(),
-    ['saved-daily', 'saved-impression'],
-    '合并后的历史页面必须重新写回主存储',
+    ['saved-daily'],
+    '只打开手札不得强制写回主存储',
   );
   assert.deepEqual(
     storedBooks.get(`${recoveryKey}:backup`).pages.map(page => page.id).sort(),
-    ['saved-daily', 'saved-impression'],
-    '合并后的历史页面必须同步到恢复快照',
+    ['saved-impression'],
+    '只打开手札不得强制写回恢复快照',
   );
+  vm.runInContext(`currentBook.pages[0].mood = '第一次真实修改'`, sandbox);
+  await vm.runInContext('saveBook()', sandbox);
+  assert.deepEqual(storedBooks.get(recoveryKey).pages.map(page => page.id).sort(), ['saved-daily', 'saved-impression']);
+  assert.deepEqual(storedBooks.get(`${recoveryKey}:backup`).pages.map(page => page.id).sort(), ['saved-daily', 'saved-impression']);
   vm.runInContext('currentBook = null', sandbox);
   await vm.runInContext('loadBook()', sandbox);
   assert.equal(vm.runInContext('currentBook.pages.length', sandbox), 2, '重新打开手札后页面仍需存在');

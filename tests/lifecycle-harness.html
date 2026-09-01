@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>私语手札生命周期测试</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    html,body{min-height:100%;margin:0;background:#26211f;color:#eee;font-family:system-ui,sans-serif}
+    #chat{padding:24px}.test-drawer{margin:12px;padding:10px;border:1px solid #777}
+  </style>
+</head>
+<body>
+  <main id="chat"><div class="mes" mesid="0"><div class="name_text">陈砚</div><div class="mes_text">下雨了，就向我这边走。</div></div></main>
+  <button id="extensionsMenuButton" type="button">魔法棒</button>
+  <div id="extensionsMenu"></div>
+  <div id="drawer-host"></div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const storageMode = params.get('storage') || 'normal';
+    const drawerMode = params.get('drawers') || 'settings2';
+    window.__PRIVATE_JOURNAL_TEST_CONFIG__ = { storageTimeoutMs: 80, storageWriteTimeoutMs: 80 };
+    window.__PJ_MODEL_CALLS = 0;
+    window.__PJ_TOASTS = [];
+    window.__PJ_STALE_CLICKS = 0;
+
+    const host = document.querySelector('#drawer-host');
+    function appendDrawer(id, visible = true) {
+      const drawer = document.createElement('section');
+      drawer.id = id;
+      drawer.className = 'test-drawer';
+      if (!visible) drawer.style.display = 'none';
+      host.append(drawer);
+      return drawer;
+    }
+    if (drawerMode === 'settings') appendDrawer('extensions_settings');
+    else if (drawerMode === 'settings2') appendDrawer('extensions_settings2');
+    else if (drawerMode === 'both-hidden-first') {
+      appendDrawer('extensions_settings', false);
+      appendDrawer('extensions_settings2', true);
+    } else appendDrawer('extensions_settings2');
+
+    if (params.get('stale') === '1') {
+      const stale = document.createElement('div');
+      stale.id = 'private-journal-wand-entry';
+      stale.textContent = '旧私语手札';
+      stale.addEventListener('click', () => { window.__PJ_STALE_CLICKS += 1; });
+      document.querySelector('#extensionsMenu').append(stale);
+    }
+
+    const sampleBook = {
+      version: 10,
+      chatId: 'lifecycle-chat',
+      characterId: 'chen-yan.png',
+      userName: '姜藏',
+      characterName: '陈砚',
+      relationship: { status: 'unchecked', reason: '', evidence: [] },
+      timeline: {}, calendar: { entries: {} }, pages: [],
+    };
+    const memory = new Map();
+    const localforage = {
+      getItem: async key => {
+        if (storageMode === 'reject-read') throw new Error('测试读取失败');
+        if (storageMode === 'pending') return new Promise(() => {});
+        return memory.get(key) || null;
+      },
+      setItem: async (key, value) => {
+        if (storageMode === 'reject-write') throw new Error('测试写入失败');
+        memory.set(key, structuredClone(value));
+        return value;
+      },
+      removeItem: async key => {
+        if (storageMode === 'reject-remove') throw new Error('测试删除失败');
+        memory.delete(key);
+      },
+    };
+    const context = {
+      version: '1.18.0',
+      uuidv4: () => crypto.randomUUID(),
+      extensionSettings: {}, characters: [{ name: '陈砚', avatar: 'chen-yan.png' }], characterId: 0,
+      groupId: null, chatId: 'lifecycle-chat', name1: '姜藏', name2: '陈砚',
+      chat: [{ is_user: false, is_system: false, mes: '下雨了，就向我这边走。' }], onlineStatus: 'connected',
+      eventTypes: {}, eventSource: { on() {}, off() {} }, chatMetadata: {},
+      saveMetadata: async () => undefined, saveSettingsDebounced() {},
+      generateQuietPrompt: async () => { window.__PJ_MODEL_CALLS += 1; return ''; },
+    };
+    window.SillyTavern = { version: '1.18.0', getContext: () => context, libs: {} };
+    if (storageMode !== 'missing') window.SillyTavern.libs.localforage = localforage;
+    window.toastr = Object.fromEntries(['success','info','warning','error'].map(level => [level, (message, title) => {
+      window.__PJ_TOASTS.push({ level, message, title });
+    }]));
+    window.confirm = () => true;
+
+    window.__PJ_TEST__ = {
+      async settle(ms = 120) { await new Promise(resolve => setTimeout(resolve, ms)); },
+      async reinitializeTwice() {
+        await window.__stPrivateJournalRuntime.initialize();
+        await window.__stPrivateJournalRuntime.initialize();
+        await this.settle();
+        return this.state();
+      },
+      async reinjectScript() {
+        const previousInstance = window.__stPrivateJournalRuntime?.instanceId;
+        const script = document.createElement('script');
+        script.src = `../index.js?hot-reload=${Date.now()}`;
+        document.body.append(script);
+        await new Promise((resolve, reject) => {
+          script.addEventListener('load', resolve, { once: true });
+          script.addEventListener('error', () => reject(new Error('脚本重新注入失败')), { once: true });
+        });
+        await this.settle();
+        return { previousInstance, currentInstance: window.__stPrivateJournalRuntime?.instanceId, state: this.state() };
+      },
+      async rebuildDrawer(id = 'extensions_settings2') {
+        document.querySelectorAll('#extensions_settings,#extensions_settings2').forEach(element => element.remove());
+        appendDrawer(id, true);
+        await this.settle();
+        return this.state();
+      },
+      state() {
+        const root = document.querySelector('#private-journal');
+        const drawerEntry = document.querySelector('[data-private-journal-entry="drawer"]');
+        const wandEntry = document.querySelector('[data-private-journal-entry="wand"]');
+        return {
+          version: root?.dataset.pluginVersion || null,
+          roots: document.querySelectorAll('#private-journal').length,
+          launchers: document.querySelectorAll('#private-journal-launcher').length,
+          captures: document.querySelectorAll('#private-journal-quote-capture').length,
+          drawerEntries: document.querySelectorAll('[data-private-journal-entry="drawer"]').length,
+          wandEntries: document.querySelectorAll('[data-private-journal-entry="wand"]').length,
+          drawerParent: drawerEntry?.parentElement?.id || null,
+          wandInstance: wandEntry?.dataset.privateJournalInstance || null,
+          open: root?.classList.contains('open') || false,
+          loading: root?.classList.contains('pj-loading') || false,
+          temporary: root?.classList.contains('pj-storage-temporary') || false,
+          notice: root?.querySelector('.pj-storage-notice')?.textContent || '',
+          modelCalls: window.__PJ_MODEL_CALLS,
+          staleClicks: window.__PJ_STALE_CLICKS,
+          toasts: window.__PJ_TOASTS.slice(),
+          diagnostics: window.__stPrivateJournalRuntime?.diagnostics?.() || null,
+        };
+      },
+    };
+  </script>
+  <script src="../index.js"></script>
+</body>
+</html>
