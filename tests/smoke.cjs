@@ -60,7 +60,25 @@ assert.equal(vm.runInContext('DEFAULTS.generationApiMode', sandbox), 'main');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
 assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
-assert.equal(manifest.version, '0.19.0');
+assert.equal(manifest.version, '0.20.0');
+assert.equal(vm.runInContext('PLUGIN_VERSION', sandbox), manifest.version);
+// JS and CSS are cached independently; the marker is what makes a stale
+// stylesheet detectable at runtime instead of silently breaking layout.
+assert.match(styleSource, /--pj-stylesheet-version:"0\.20\.0"/);
+assert.equal(
+  styleSource.match(/--pj-stylesheet-version:"([^"]+)"/)[1],
+  manifest.version,
+  'style.css version marker must match manifest/PLUGIN_VERSION',
+);
+// document.currentScript is null under SillyTavern's module loader, so the
+// resolver must have real fallbacks rather than a single lookup.
+assert.match(source, /error-stack/);
+assert.match(source, /script-tag/);
+assert.doesNotMatch(source, /const EXTENSION_SCRIPT_URL = document\.currentScript/);
+assert.equal(typeof vm.runInContext('journalSelfReport', sandbox), 'function');
+assert.equal(typeof vm.runInContext('probeOverlay', sandbox), 'function');
+assert.equal(typeof vm.runInContext('inspectStylesheet', sandbox), 'function');
+assert.equal(typeof vm.runInContext('activateJournalFromPointer', sandbox), 'function');
 assert.equal(vm.runInContext("PAGE_TYPES.calendar.label", sandbox), '心情月历');
 for (const theme of ['botanical-noir', 'rococo-garden', 'indigo-reed', 'italian-marble', 'magnolia-swallow']) {
   assert.match(styleSource, new RegExp(`assets/themes/cutouts/${theme}\\.webp`));
@@ -80,6 +98,12 @@ assert.match(styleSource, /\.pj-style-palette/);
 assert.match(styleSource, /#private-journal\[data-desk="forest-walnut"\]/);
 assert.match(styleSource, /#private-journal \.pj-cover-art\s*\{/);
 assert.match(styleSource, /object-fit:fill!important/);
+assert.match(styleSource, /\.pj-cover[^}]*-webkit-transform-style:preserve-3d/, 'Safari 封面需要 WebKit 3D 上下文');
+assert.match(styleSource, /\.pj-cover-face[^}]*-webkit-backface-visibility:hidden/, 'Safari 不得把封底绘制到正面');
+assert.match(styleSource, /\.pj-cover-front[^}]*visibility:visible/, '合上时必须显式显示封面正面');
+assert.match(styleSource, /\.pj-cover-back[^}]*visibility:hidden/, '合上时必须显式隐藏封底，规避 WebKit 背面穿透');
+assert.match(styleSource, /#private-journal\.book-open \.pj-cover-front[^}]*visibility:hidden/);
+assert.match(styleSource, /#private-journal\.book-open \.pj-cover-back[^}]*visibility:visible/);
 assert.match(styleSource, /--pj-font-cover:/);
 assert.match(styleSource, /font-family:var\(--pj-font-cover\)/);
 assert.match(styleSource, /--pj-name-y:23\.5%/);
@@ -90,32 +114,82 @@ assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
 assert.match(source, /#extensions_settings,#extensions_settings2/);
 assert.match(source, /selectExtensionDrawerContainer/);
-assert.match(source, /PLUGIN_VERSION = '0\.19\.0'/);
+assert.match(source, /PLUGIN_VERSION = '0\.20\.0'/);
 assert.match(source, /privateJournalInstance/);
 assert.match(source, /initialize:failed/);
 assert.match(source, /safeToastr\('error', `私语手札 v\$\{PLUGIN_VERSION\} 初始化失败/);
 assert.match(source, /private-journal-extension-entry/);
 assert.match(source, /pj-quote-capture-preview/);
+assert.match(source, /function clearQueuedMenuInstall\(\)/, '入口重挂载队列必须有统一清理函数');
+assert.match(source, /cancelQueuedMenuInstall = \(\) => clearTimeout\(handle\)/, 'setTimeout 调度必须由 clearTimeout 取消');
+assert.match(source, /cancelQueuedMenuInstall = \(\) => window\.cancelAnimationFrame\?\.\(handle\)/, 'requestAnimationFrame 调度必须由 cancelAnimationFrame 取消');
+assert.doesNotMatch(source, /const cancel = window\.cancelAnimationFrame \|\| clearTimeout/, '不能仅凭 cancelAnimationFrame 存在就猜测队列句柄类型');
 assert.match(styleSource, /\.pj-extension-open-button/);
 assert.match(styleSource, /@media\(max-width:860px\)[\s\S]*?width:calc\(100vw - 20px\)/);
 assert.doesNotMatch(styleSource, /@media\(max-width:860px\)[\s\S]*?width:980px/);
 assert.match(styleSource, /#private-journal-launcher[^}]*touch-action:none/);
 assert.match(styleSource, /pj-reader-out-forward/);
 assert.match(styleSource, /pj-reader-in-forward/);
-const openJournalStart = source.indexOf('async function openJournal()');
+assert.doesNotMatch(styleSource, /660%/, '翻页阴影不得像扫描条一样横穿整本书');
+assert.doesNotMatch(styleSource, /opacity:\.12;\s*transform:translate3d/, '切换栏目不得把整页闪灭并横移');
+assert.match(styleSource, /@keyframes pj-reader-sheet-forward[\s\S]*?rotateY\(-178deg\)/, '翻页应由纸张围绕书脊翻转');
+assert.match(styleSource, /\.pj-page-turner::after/, '翻动纸张需要背页层次，而不是单层渐变条');
+assert.match(styleSource, /animation:pj-reader-sheet-forward \.62s cubic-bezier\(\.45,0,\.55,1\)/, '纸张应以对称缓动经过 90° 中点');
+assert.match(source, /\}, 310\);\s*\n\}/, '内容必须在纸张经过中点时交换');
+assert.match(styleSource, /\.pj-api-popover[^}]*width:min\(310px,calc\(100vw - 28px\)\)/, '副 API 面板不应过宽');
+assert.match(styleSource, /\.pj-api-popover[^}]*box-sizing:border-box/, '副 API 面板宽度必须包含 padding 与边框');
+assert.match(styleSource, /\.pj-model-picker[^}]*max-width:260px/, '模型选择行应保持紧凑');
+assert.doesNotMatch(source, /\.slice\(0,\s*500\)/, '完整模型列表不得在渲染时硬截断为 500 个');
+const openJournalStart = source.indexOf('async function openJournal(');
+assert.ok(openJournalStart > 0, 'openJournal must exist');
 const openJournalEnd = source.indexOf('\nfunction startBookLoad', openJournalStart);
 const openJournalSource = source.slice(openJournalStart, openJournalEnd);
 assert.ok(
   openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("startBookLoad('open')"),
   '移动端点击后必须先显示手札，再等待 IndexedDB 加载',
 );
+// The overlay must not depend on style.css being fresh, and the visibility
+// probe must run on the same tick the class is applied.
+assert.ok(
+  openJournalSource.indexOf("root.style.display = 'block'") < openJournalSource.indexOf("startBookLoad('open')"),
+  '打开时必须直接设置 inline display，不能只依赖 .open 样式规则',
+);
+assert.ok(
+  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("probeOverlay('after-open')"),
+  'probeOverlay 必须在 add(open) 之后立即执行',
+);
+assert.match(openJournalSource, /trace\('openJournal:enter'/);
 assert.doesNotMatch(openJournalSource, /await\s+(?:loadBook|storageRead|storageWrite)/);
 assert.doesNotMatch(openJournalSource, /generateQuietPrompt|callJournalApi|callCurrentMainApi|fetch\s*\(/, '打开手札不得触发任何模型 API');
+assert.match(
+  openJournalSource,
+  /raf\(\(\) => \{\s*if \(root !== openingRoot[^}]+try \{ render\(\);[\s\S]*?startBookLoad\('open'\)/,
+  '完整排版与存储读取必须延后到下一帧，不能拖慢入口点击返回',
+);
 const loadBookStart = source.indexOf('async function loadBook(');
 const loadBookEnd = source.indexOf('\nfunction migrateBook', loadBookStart);
 assert.doesNotMatch(source.slice(loadBookStart, loadBookEnd), /saveSpecificBook|storageWrite/, '读取或打开空手札不得强制写数据库');
 assert.equal(vm.runInContext("launcherDragThreshold('touch')", sandbox), 14);
 assert.equal(vm.runInContext("launcherDragThreshold('mouse')", sandbox), 5);
+
+sandbox.mixedModelPayload = {
+  data: { data: [{ id: 'alpha' }], models: [{ name: 'beta' }] },
+  models: ['gamma'],
+  result: { models: [{ model: 'delta' }] },
+  model_names: ['epsilon'],
+};
+const mixedModelIds = vm.runInContext('extractModelIds(mixedModelPayload)', sandbox);
+assert.deepEqual(
+  Array.from(mixedModelIds).sort(),
+  ['alpha', 'beta', 'delta', 'epsilon', 'gamma'],
+  '不同供应商和代理返回的模型数组必须合并解析，不能只取第一组',
+);
+sandbox.largeModelPayload = { data: Array.from({ length: 2105 }, (_, index) => ({ id: `model-${index}` })) };
+assert.equal(
+  vm.runInContext('extractModelIds(largeModelPayload).length', sandbox),
+  2105,
+  '模型解析不得使用任意数量上限截断服务端返回结果',
+);
 
 const strictPage = vm.runInContext(`parseJson('{"title":"雨后","body":"我们回到了屋檐下。"}', 'daily_note')`, sandbox);
 assert.equal(strictPage.title, '雨后');

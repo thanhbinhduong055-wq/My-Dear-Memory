@@ -15,7 +15,7 @@
 - 五个笔记本均使用带透明通道的独立主体素材，不再把原图的米色摄影底和独立书签一起显示；封面与桌面已转换为高质量 WebP，显著减小手机下载体积且不依赖外部图床
 - 每套主题分别校准姓名坐标，自动把当前 User 与 Char 的名字落在该封面真实留白处；封面题签使用清雅楷体字族并降低视觉重心，点击封面可翻开或合上手札
 - 打开后的双页尺寸由当前笔记本真实长宽比计算，内页使用米色道林纸质感；六个栏目使用书本右缘可点击书签，中央丝带书签可以直接合上手札
-- 封面页左上角的装帧材料盘分为“封面”和“桌面”两排，可独立选择、任意组合；封面围绕书脊自然翻开，栏目切换采用类似阅读器的短距离横向滑动、交叉淡入与页影扫过，不再使用僵硬的整张 3D 翻折
+- 封面页左上角的装帧材料盘分为“封面”和“桌面”两排，可独立选择、任意组合；封面围绕书脊自然翻开，栏目切换由一张独立纸页在 620ms 内绕书脊翻过，内容只做轻微明暗衔接，不再整页闪灭或出现横穿书本的扫描条
 - 内页采用宋体/思源宋体为正文、中文无衬线体为界面标签，正文不低于 16px，并以舒适版心、段落间距和清晰的标题层级呈现
 - 生成语气会同时参考 User Persona 和聊天里 User 的真实措辞习惯，包括句长、克制程度、情绪强度、幽默与称呼方式
 - 生成接口可自主切换“跟随正文 API”或“副 API”；副 API 可选择 SillyTavern 已保存的连接配置、拉取该连接可用模型并选择或手动输入模型 ID，模型选择区采用紧凑宽度，仍会读取当前角色卡、User Persona、最近对话、已激活世界书与扩展记忆
@@ -42,9 +42,50 @@
 3. 粘贴 Git 仓库 URL 并安装。
 4. 打开任意角色聊天，点击或拖动右下角酒红色 `❦` 按钮；也可以在魔法棒菜单，或“扩展”抽屉中点击“私语手札”。
 
-运行版本会显示在手札内页底部，例如 `v0.19.0`；浏览器控制台也会打印 `[Private Journal v0.19.0] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。
+运行版本会显示在手札内页底部，例如 `v0.20.0`；浏览器控制台也会打印 `[Private Journal v0.20.0] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。
 
 本地开发时，也可把整个目录放入 SillyTavern 的 `data/<user-handle>/extensions/`，或安装为所有用户后放到 `public/scripts/extensions/third-party/` 对应目录。
+
+## 手机端排障（0.20.0）
+
+先在手机浏览器 Console 里跑这一行，它会直接给出 A–E 判定：
+
+```js
+window.__stPrivateJournalRuntime.report()
+```
+
+`verdict` 的含义：
+
+| verdict | 含义 | 处理 |
+| --- | --- | --- |
+| `D:stale-css-cached` | JS 是新版、style.css 是旧缓存 | 清缓存强制刷新 |
+| `D:css-not-loaded` | style.css 根本没加载 | 检查扩展安装/路径 |
+| `C:runtime-root-missing` | root 不在 DOM 里 | 看 `trace()` 里谁删的 |
+| `C:multiple-runtimes-in-page` | 页面里有两个实例 | 看 `runtime:superseding` |
+| `A:no-entry-events-recorded` | 入口根本没收到事件 | 入口层问题 |
+| `A:entry-events-never-reached-openJournal` | 收到事件但没进 openJournal | 事件被拦截 |
+| `B:hidden-by-style` / `B:geometry-off-screen` / `B:covered-by-other-element` | 打开了但看不见 | 看 `overlay` 字段 |
+| `visible` | 真的显示出来了 | — |
+
+其他可用入口：
+
+```js
+window.__stPrivateJournalRuntime.version        // 必须是 0.20.0，否则是缓存/安装问题
+window.__stPrivateJournalRuntime.openJournal()  // 绕开所有入口直接打开
+window.__stPrivateJournalRuntime.probeOverlay() // computed style + rect + elementsFromPoint
+window.__stPrivateJournalRuntime.stylesheet()   // CSS 版本标记比对
+window.__stPrivateJournalRuntime.assets()       // 资源根目录用哪种策略解析出来的
+window.__stPrivateJournalRuntime.entryLog()     // 入口事件流水
+window.__stPrivateJournalRuntime.trace()        // 跨实例生命周期账本
+```
+
+**三向拆分**：若 `openJournal()` 直接调用能显示 → 是入口事件问题（A）；
+若 open=true 但仍看不见 → CSS / stacking / viewport 问题（B）；
+若直接调用都失败 → root / runtime / 初始化生命周期问题（C）。
+
+页面上还有两个不依赖 Console 的版本标记：
+`document.documentElement.dataset.privateJournalVersion` 和
+`#private-journal` 的 `data-plugin-version`。
 
 ## 数据与隐私
 
@@ -65,7 +106,7 @@
 - 旧版已保存的“伪 JSON 正文”会在打开手札时尝试本地修复；旧版诗句和歌曲字段会在迁移时清除，以上过程都不会消耗 API。
 - 批量输出采用长篇幅标签协议并优先生成三个必存栏目；解析器可保存同类多页，并在模型末尾被截断时抢救已经写出的完整正文。缺少栏目会明确提示，但不会静默失败或自动追加 API 请求。
 - 单页建议篇幅为：印象 220–320 字、相处日记 320–500 字、情书 420–620 字、恋爱日记 420–650 字；实际长度仍取决于所选模型是否遵守提示。
-- 副 API 的模型列表由 SillyTavern 服务端依据所选连接配置查询；少数不提供模型枚举的后端会显示拉取失败，此时仍可手动输入模型 ID。
+- 副 API 的模型列表由 SillyTavern 服务端依据所选连接配置查询；插件会合并响应中多层及多组模型数组、去重并完整展示，不再只读取第一组或截断为 500 项。少数不提供模型枚举的后端会显示拉取失败，此时仍可手动输入模型 ID。
 - 如果模型不支持或没有遵守 JSON 格式，扩展会保留原始生成文本作为降级日记页，而不是丢弃结果。
 - 关系判定坚持明确关系优先：暧昧、单恋、调情或角色卡中的未来倾向不会自动解锁恋爱日记；User 可以手动确认当前故事关系。
 - 旧版“初印象”页面会自动迁移并保留到新版“印象”栏目。

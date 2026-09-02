@@ -96,7 +96,9 @@
       async reinitializeTwice() {
         await window.__stPrivateJournalRuntime.initialize();
         await window.__stPrivateJournalRuntime.initialize();
-        await this.settle();
+        // Wait beyond the observer throttle window so a stale timeout from the
+        // reinitialized instance would have time to reinsert old entries.
+        await this.settle(360);
         return this.state();
       },
       async reinjectScript() {
@@ -108,7 +110,9 @@
           script.addEventListener('load', resolve, { once: true });
           script.addEventListener('error', () => reject(new Error('脚本重新注入失败')), { once: true });
         });
-        await this.settle();
+        // A newly injected runtime has a different closure and instance id.
+        // Give the superseded runtime's delayed observer callback time to fire.
+        await this.settle(360);
         return { previousInstance, currentInstance: window.__stPrivateJournalRuntime?.instanceId, state: this.state() };
       },
       async rebuildDrawer(id = 'extensions_settings2') {

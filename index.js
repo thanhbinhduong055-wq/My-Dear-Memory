@@ -5,10 +5,86 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const EXTENSION_SCRIPT_URL = document.currentScript?.src || '';
-const PLUGIN_VERSION = '0.19.0';
+const PLUGIN_VERSION = '0.20.0';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
+const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+// SillyTavern loads third-party extensions with <script type="module">, and
+// document.currentScript is ALWAYS null for module scripts. Relying on it alone
+// silently resolves ./assets/... against the tavern root instead of the
+// extension folder, so try several independent strategies and record which won.
+function resolveExtensionScriptUrl() {
+  const attempts = [];
+  const push = (strategy, url) => { attempts.push({ strategy, url: url || '' }); return url || ''; };
+
+  const direct = push('document.currentScript', (() => {
+    try { return document.currentScript?.src || ''; } catch (error) { return ''; }
+  })());
+  if (direct) return { url: direct, strategy: 'document.currentScript', attempts };
+
+  const fromStack = push('error-stack', (() => {
+    try {
+      const stack = String(new Error('private-journal-locate').stack || '');
+      return stack.match(/https?:\/\/[^\s)'"]+?\/index\.js/i)?.[0] || '';
+    } catch (error) { return ''; }
+  })());
+  if (fromStack) return { url: fromStack, strategy: 'error-stack', attempts };
+
+  const fromTag = push('script-tag', (() => {
+    try {
+      const sources = [...document.querySelectorAll('script[src]')].map(node => node.src || '');
+      return sources.find(src => /extensions\/[^?#]*index\.js(\?|#|$)/i.test(src)) || '';
+    } catch (error) { return ''; }
+  })());
+  if (fromTag) return { url: fromTag, strategy: 'script-tag', attempts };
+
+  return { url: '', strategy: 'none', attempts };
+}
+
+const extensionScriptInfo = resolveExtensionScriptUrl();
+const EXTENSION_SCRIPT_URL = extensionScriptInfo.url;
+let extensionAssetBaseInfo = { base: EXTENSION_SCRIPT_URL, strategy: extensionScriptInfo.strategy };
+
+try { if (document.documentElement?.dataset) document.documentElement.dataset.privateJournalVersion = PLUGIN_VERSION; } catch (error) { /* Detached documents have no root element. */ }
+
+const traceLog = (() => {
+  try {
+    const existing = globalThis[TRACE_KEY];
+    if (Array.isArray(existing)) return existing;
+    globalThis[TRACE_KEY] = [];
+    return globalThis[TRACE_KEY];
+  } catch (error) { return []; }
+})();
+
+function describeNode(node) {
+  if (!node) return null;
+  if (node === document) return '#document';
+  if (node === globalThis) return 'window';
+  const tag = String(node.tagName || node.nodeName || 'node').toLowerCase();
+  const id = node.id ? `#${node.id}` : '';
+  const cls = node.classList?.length ? `.${[...node.classList].slice(0, 3).join('.')}` : '';
+  const owner = node.dataset?.privateJournalInstance ? `@${node.dataset.privateJournalInstance}` : '';
+  return `${tag}${id}${cls}${owner}`;
+}
+
+// Instance-scoped ledger that deliberately survives disposal, so a second
+// runtime deleting the first one's DOM is visible from either instance.
+function trace(stage, extra = {}) {
+  const record = {
+    at: new Date().toISOString(),
+    stage,
+    instanceId: INSTANCE_ID,
+    pluginVersion: PLUGIN_VERSION,
+    ...extra,
+  };
+  try {
+    traceLog.push(record);
+    if (traceLog.length > 400) traceLog.splice(0, traceLog.length - 400);
+  } catch (error) { /* Frozen arrays in exotic sandboxes. */ }
+  try { console.info(`[PJ ${PLUGIN_VERSION} ${INSTANCE_ID}] ${stage}`, extra); } catch (error) { /* Console may be stubbed. */ }
+  return record;
+}
 const STORAGE_READ_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageTimeoutMs) || 3000;
 const STORAGE_WRITE_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageWriteTimeoutMs) || 5000;
 const BOOK_VERSION = 10;
@@ -62,6 +138,9 @@ let lifecycleCleanups = [];
 let boundWandButton = null;
 let boundWandButtonHandler = null;
 let menuInstallFrame = null;
+let cancelQueuedMenuInstall = null;
+let lastMenuInstallAt = 0;
+const MENU_INSTALL_MIN_INTERVAL_MS = 250;
 let initializationRevision = 0;
 let pendingBookLoad = null;
 let pendingBookLoadKey = null;
@@ -160,19 +239,248 @@ const DESKS = {
   'magnolia-inkstone': { label: '玉兰墨砚', shortLabel: '墨砚', asset: './assets/backgrounds/magnolia-inkstone.webp' },
 };
 
+// --- Entry / activation instrumentation -----------------------------------
+let lastActivationAt = 0;
+let lastActivationSource = '';
+const ACTIVATION_DEDUPE_MS = 700;
+
+function recordEntryEvent(source, event, phase = 'observe') {
+  return trace('entry', {
+    source,
+    phase,
+    eventType: event?.type || null,
+    pointerType: event?.pointerType ?? null,
+    pointerId: event?.pointerId ?? null,
+    isPrimary: event?.isPrimary ?? null,
+    target: describeNode(event?.target),
+    currentTarget: describeNode(event?.currentTarget),
+    defaultPrevented: Boolean(event?.defaultPrevented),
+    targetConnected: Boolean(event?.target?.isConnected),
+    currentTargetConnected: Boolean(event?.currentTarget?.isConnected),
+  });
+}
+
+function coarsePointerEnvironment() {
+  try { return window.matchMedia?.('(pointer:coarse)')?.matches === true; } catch (error) { return false; }
+}
+
+// pointerup is the reliable activation path on touch, but it is followed by a
+// synthetic click. One shared timestamp gate covers every entry so the two
+// never open the journal twice.
+function activateJournalFromPointer(event, source) {
+  const now = Date.now();
+  if (now - lastActivationAt < ACTIVATION_DEDUPE_MS) {
+    trace('entry:deduped', { source, eventType: event?.type || null, sinceMs: now - lastActivationAt, previousSource: lastActivationSource });
+    return false;
+  }
+  lastActivationAt = now;
+  lastActivationSource = source;
+  recordEntryEvent(source, event, 'activate');
+  void openJournal({ source });
+  return true;
+}
+
+function bindJournalActivation(element, source) {
+  if (!element?.addEventListener) return;
+  for (const type of ['pointerdown', 'touchstart', 'pointerup', 'click']) {
+    try { element.addEventListener(type, event => recordEntryEvent(source, event, 'observe'), { passive: true, capture: true }); }
+    catch (error) { element.addEventListener(type, event => recordEntryEvent(source, event, 'observe'), true); }
+  }
+  element.addEventListener('pointerup', event => {
+    if (event.pointerType === 'mouse') return;
+    if (event.isPrimary === false) return;
+    activateJournalFromPointer(event, source);
+  });
+  element.addEventListener('click', event => {
+    event.preventDefault?.();
+    if (!coarsePointerEnvironment() || Date.now() - lastActivationAt >= ACTIVATION_DEDUPE_MS) {
+      activateJournalFromPointer(event, source);
+    } else {
+      trace('entry:deduped', { source, eventType: 'click', sinceMs: Date.now() - lastActivationAt, previousSource: lastActivationSource });
+    }
+  });
+}
+
+// Answers "is the overlay actually on screen", not "did we set a class".
+function probeOverlay(label = 'probe') {
+  if (!root?.isConnected) {
+    return trace(`overlay:${label}`, { rootConnected: false, rootExists: Boolean(root) });
+  }
+  let computed = {};
+  try { computed = window.getComputedStyle?.(root) || {}; } catch (error) { /* Mock DOM. */ }
+  let rect = { left: 0, top: 0, width: 0, height: 0 };
+  try { rect = root.getBoundingClientRect?.() || rect; } catch (error) { /* Mock DOM. */ }
+  const viewportWidth = Number(window.innerWidth) || 0;
+  const viewportHeight = Number(window.innerHeight) || 0;
+  let stack = [];
+  let topmostInsideOverlay = null;
+  try {
+    const hits = document.elementsFromPoint(viewportWidth / 2, viewportHeight / 2) || [];
+    stack = [...hits].slice(0, 10).map(describeNode);
+    topmostInsideOverlay = hits[0] ? Boolean(hits[0].closest?.('#private-journal')) : false;
+  } catch (error) { /* elementsFromPoint is unavailable in mock DOMs. */ }
+  const coversViewport = rect.width >= viewportWidth && rect.height >= viewportHeight && rect.left <= 1 && rect.top <= 1;
+  const report = {
+    rootConnected: true,
+    className: root.className,
+    hidden: Boolean(root.hidden),
+    inlineDisplay: root.style?.display || '',
+    display: computed.display,
+    visibility: computed.visibility,
+    opacity: computed.opacity,
+    position: computed.position,
+    zIndex: computed.zIndex,
+    transform: computed.transform,
+    pointerEvents: computed.pointerEvents,
+    rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+    viewport: { width: viewportWidth, height: viewportHeight },
+    coversViewport,
+    topmostInsideOverlay,
+    stack,
+    stylesheet: inspectStylesheet(),
+  };
+  const hiddenByStyle = computed.display === 'none' || computed.visibility === 'hidden' || Number(computed.opacity) === 0;
+  report.verdict = !root.classList.contains('open') ? 'closed'
+    : hiddenByStyle ? 'B:hidden-by-style'
+    : !coversViewport ? 'B:geometry-off-screen'
+    : topmostInsideOverlay === false ? 'B:covered-by-other-element'
+    : 'visible';
+  trace(`overlay:${label}`, report);
+  if (report.verdict.startsWith('B:')) {
+    console.error(`[PJ ${PLUGIN_VERSION}] overlay open but not visible → ${report.verdict}`, report);
+  }
+  return report;
+}
+
+// One call the user can paste into a phone console to get an A-E verdict.
+function journalSelfReport() {
+  const stylesheet = inspectStylesheet();
+  const overlay = probeOverlay('self-report');
+  const entries = ['#private-journal-launcher', '#private-journal-wand-entry', '#private-journal-extension-entry']
+    .map(selector => {
+      const element = document.querySelector(selector);
+      return {
+        selector,
+        present: Boolean(element),
+        owner: element?.dataset?.privateJournalInstance || null,
+        mine: element?.dataset?.privateJournalInstance === INSTANCE_ID,
+      };
+    });
+  const stageCount = stage => traceLog.filter(record => record.stage === stage).length;
+  const entryEvents = traceLog.filter(record => record.stage === 'entry');
+  const activations = entryEvents.filter(record => record.phase === 'activate');
+  const opens = stageCount('openJournal:enter');
+  const instances = [...new Set(traceLog.map(record => record.instanceId))];
+
+  let verdict;
+  if (stylesheet.status === 'stale') verdict = 'D:stale-css-cached';
+  else if (stylesheet.status === 'missing') verdict = 'D:css-not-loaded';
+  else if (!root?.isConnected) verdict = 'C:runtime-root-missing';
+  else if (instances.length > 1) verdict = 'C:multiple-runtimes-in-page';
+  else if (!entryEvents.length && !opens) verdict = 'A:no-entry-events-recorded';
+  else if (entryEvents.length && !opens) verdict = 'A:entry-events-never-reached-openJournal';
+  else if (overlay.verdict?.startsWith('B:')) verdict = overlay.verdict;
+  else if (overlay.verdict === 'closed') verdict = 'closed-not-yet-opened';
+  else verdict = 'visible';
+
+  const report = {
+    verdict,
+    runtimeVersion: PLUGIN_VERSION,
+    htmlMarker: document.documentElement?.dataset?.privateJournalVersion || null,
+    rootMarker: root?.dataset?.pluginVersion || null,
+    instanceId: INSTANCE_ID,
+    instancesSeen: instances,
+    initializeCount: stageCount('initialize:start'),
+    cleanupCount: stageCount('cleanupPluginInstance'),
+    openJournalCount: opens,
+    entryEventCount: entryEvents.length,
+    activationCount: activations.length,
+    dedupedCount: stageCount('entry:deduped'),
+    entries,
+    stylesheet,
+    assets: { ...extensionAssetBaseInfo, attempts: extensionScriptInfo.attempts },
+    overlay,
+    sillyTavernVersion: sillyTavernVersion(),
+    coarsePointer: coarsePointerEnvironment(),
+  };
+  trace('self-report', { verdict, stylesheet: stylesheet.status, instances: instances.length });
+  console.info(`[PJ ${PLUGIN_VERSION}] self-report verdict: ${verdict}`, report);
+  return report;
+}
+
 function extensionAssetUrl(asset) {
   let baseUrl = EXTENSION_SCRIPT_URL;
-  if (!baseUrl && document.styleSheets) {
-    for (const sheet of document.styleSheets) {
-      if (!sheet.href) continue;
-      try {
-        const ownsJournalStyles = [...(sheet.cssRules || [])].some(rule => String(rule.selectorText || '').includes('#private-journal'));
-        if (ownsJournalStyles) { baseUrl = sheet.href; break; }
-      } catch (error) { /* Cross-origin stylesheets cannot expose cssRules. */ }
-    }
+  let strategy = extensionScriptInfo.strategy;
+  if (!baseUrl) {
+    const sheet = findJournalStylesheet();
+    if (sheet?.href) { baseUrl = sheet.href; strategy = 'stylesheet-href'; }
   }
-  if (!baseUrl) return asset;
+  if (!baseUrl) {
+    // Every earlier strategy failed, so ./assets/... would resolve against the
+    // tavern root and 404. Say so instead of shipping silently broken images.
+    if (extensionAssetBaseInfo.strategy !== 'none') {
+      extensionAssetBaseInfo = { base: '', strategy: 'none' };
+      logLifecycle('assets:base-url-unresolved', new Error('无法定位扩展资源根目录'), {
+        attempts: extensionScriptInfo.attempts,
+      });
+    }
+    return asset;
+  }
+  extensionAssetBaseInfo = { base: baseUrl, strategy };
   try { return new URL(asset, baseUrl).href; } catch (error) { return asset; }
+}
+
+function findJournalStylesheet() {
+  let sheets = [];
+  try { sheets = [...(document.styleSheets || [])]; } catch (error) { return null; }
+  for (const sheet of sheets) {
+    if (!sheet.href) continue;
+    try {
+      const ownsJournalStyles = [...(sheet.cssRules || [])].some(rule => String(rule.selectorText || '').includes('#private-journal'));
+      if (ownsJournalStyles) return sheet;
+    } catch (error) { /* Cross-origin stylesheets cannot expose cssRules. */ }
+  }
+  return null;
+}
+
+// The plugin's JS and CSS are cached independently. A phone can hold a stale
+// style.css long after index.js updated, so the stylesheet carries its own
+// version marker and we compare it against this build.
+function inspectStylesheet() {
+  let marker = '';
+  try {
+    if (root?.isConnected) {
+      marker = String(window.getComputedStyle?.(root)?.getPropertyValue('--pj-stylesheet-version') || '')
+        .trim().replace(/^["']|["']$/g, '');
+    }
+  } catch (error) { /* getComputedStyle is unavailable in mock DOMs. */ }
+  let links = [];
+  try {
+    links = [...document.querySelectorAll('link[rel~="stylesheet"][href]')]
+      .map(node => node.href).filter(href => /style\.css/i.test(href));
+  } catch (error) { /* Mock DOMs return nothing. */ }
+  const sheet = findJournalStylesheet();
+  let status = 'ok';
+  if (!marker && !sheet) status = 'missing';
+  else if (!marker) status = 'unreadable';
+  else if (marker !== PLUGIN_VERSION) status = 'stale';
+  return { status, marker, expected: PLUGIN_VERSION, sheetHref: sheet?.href || null, links };
+}
+
+function reportStylesheetHealth(phase) {
+  const report = inspectStylesheet();
+  if (report.status === 'ok') {
+    trace('stylesheet:ok', { phase, ...report });
+    return report;
+  }
+  const message = report.status === 'stale'
+    ? `Private Journal stylesheet stale: CSS ${report.marker} vs JS ${PLUGIN_VERSION}`
+    : `Private Journal stylesheet ${report.status}`;
+  logLifecycle('stylesheet:unhealthy', new Error(message), { phase, ...report });
+  safeToastr('error', report.status === 'stale'
+    ? `私语手札样式表版本不符：CSS ${report.marker} / JS ${PLUGIN_VERSION}。请强制刷新（清缓存）后重试。`
+    : '私语手札样式表未加载。请强制刷新（清缓存）后重试。');
+  return report;
 }
 
 function themeAssetUrl(themeKey) {
@@ -1188,12 +1496,42 @@ function profileDisplayName(profile) {
 }
 
 function extractModelIds(payload) {
-  const candidates = [payload?.data?.data, payload?.data, payload?.models, payload?.result];
-  const list = candidates.find(Array.isArray) || [];
-  const ids = list.map(item => typeof item === 'string' ? item : (item?.id || item?.name || item?.model))
-    .map(value => String(value || '').trim())
-    .filter(Boolean);
-  return [...new Set(ids)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).slice(0, 2000);
+  const ids = [];
+  const visited = new WeakSet();
+  const collectionKeys = new Set(['data', 'models', 'result', 'results', 'items', 'model_names', 'modelNames', 'model_ids', 'modelIds']);
+  const add = value => {
+    const id = String(value || '').trim();
+    if (id) ids.push(id);
+  };
+  const visit = (value, depth = 0) => {
+    if (value == null || depth > 7) return;
+    if (typeof value === 'string') {
+      add(value);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    if (visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === 'string') {
+          add(item);
+          continue;
+        }
+        if (!item || typeof item !== 'object') continue;
+        add(item.id ?? item.model ?? item.name ?? item.slug);
+        for (const key of collectionKeys) {
+          if (Object.hasOwn(item, key)) visit(item[key], depth + 1);
+        }
+      }
+      return;
+    }
+    for (const key of collectionKeys) {
+      if (Object.hasOwn(value, key)) visit(value[key], depth + 1);
+    }
+  };
+  visit(payload);
+  return [...new Set(ids)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 }
 
 async function fetchSecondaryModels(profileId = getSettings().secondaryProfileId) {
@@ -2259,7 +2597,7 @@ function renderApiRouter() {
   const availableModels = secondaryModelsProfileId === settings.secondaryProfileId
     ? secondaryModelOptions
     : [settings.secondaryModelId, selectedProfile?.model].filter(Boolean);
-  const modelOptions = [...new Set(availableModels)].slice(0, 500)
+  const modelOptions = [...new Set(availableModels)]
     .map(model => `<option value="${escapeHtml(model)}"></option>`).join('');
   const modelState = secondaryModelsProfileId === settings.secondaryProfileId && secondaryModelOptions.length
     ? `已拉取 ${secondaryModelOptions.length} 个模型`
@@ -2331,8 +2669,8 @@ function turnToType(type) {
     render();
     root?.classList.remove('page-turn-out');
     root?.classList.add('page-turn-in');
-    pageTurnTimer = setTimeout(() => root?.classList.remove('page-turning', 'page-turn-in'), 260);
-  }, 150);
+    pageTurnTimer = setTimeout(() => root?.classList.remove('page-turning', 'page-turn-in'), 320);
+  }, 310);
 }
 
 function bind() {
@@ -2367,6 +2705,7 @@ function bind() {
     }
     if (action === 'close') {
       root.classList.remove('open');
+      root.style.display = 'none';
       const launcher = document.querySelector('#private-journal-launcher');
       if (launcher) launcher.hidden = false;
       bookOpen = false;
@@ -2489,32 +2828,47 @@ function bind() {
   });
 }
 
-async function openJournal() {
+async function openJournal({ source = 'api' } = {}) {
+  trace('openJournal:enter', {
+    source,
+    rootExists: Boolean(root),
+    rootConnected: Boolean(root?.isConnected),
+    rootInstance: root?.dataset?.privateJournalInstance || null,
+  });
   if (!root?.isConnected) {
     const error = new Error('手札界面尚未完成初始化');
-    logLifecycle('openJournal:root-missing', error);
+    logLifecycle('openJournal:root-missing', error, { source, verdict: 'C:runtime-root-missing' });
     safeToastr('error', '私语手札尚未完成初始化，请刷新页面后重试。');
     return false;
   }
   // This must remain the first user-visible operation. Storage is deliberately background-only.
   root.classList.add('open');
+  // Inline display so the overlay still obeys JS when style.css is stale or absent.
+  root.style.display = 'block';
+  probeOverlay('after-open');
+  const raf = window.requestAnimationFrame || (callback => setTimeout(callback, 16));
+  const openingRoot = root;
+  raf(() => raf(() => probeOverlay('after-open-frame')));
   const launcher = document.querySelector('#private-journal-launcher');
   if (launcher) launcher.hidden = true;
-  bookOpen = false;
-  resetMobilePan();
-  currentBook ||= blankBook();
-  currentBookStorageKey ||= storageKey();
-  root.classList.add('pj-loading');
-  root.setAttribute('aria-busy', 'true');
-  try { render(); } catch (error) { logLifecycle('openJournal:initial-render', error); }
-  void startBookLoad('open').catch(error => {
-    logLifecycle('openJournal:background-load', error);
-    render();
-    safeToastr('warning', '本机存储暂不可用，手札已进入临时会话模式。');
-  }).finally(() => {
-    root.classList.remove('pj-loading');
-    root.removeAttribute('aria-busy');
-    renderStorageNotice();
+  raf(() => {
+    if (root !== openingRoot || !openingRoot.isConnected || !openingRoot.classList.contains('open')) return;
+    bookOpen = false;
+    resetMobilePan();
+    currentBook ||= blankBook();
+    openingRoot.classList.add('pj-loading');
+    openingRoot.setAttribute('aria-busy', 'true');
+    try { render(); } catch (error) { logLifecycle('openJournal:initial-render', error); }
+    void startBookLoad('open').catch(error => {
+      logLifecycle('openJournal:background-load', error);
+      render();
+      safeToastr('warning', '本机存储暂不可用，手札已进入临时会话模式。');
+    }).finally(() => {
+      if (root !== openingRoot) return;
+      openingRoot.classList.remove('pj-loading');
+      openingRoot.removeAttribute('aria-busy');
+      renderStorageNotice();
+    });
   });
   return true;
 }
@@ -2599,7 +2953,10 @@ function launcherDragThreshold(pointerType) {
 
 function makeLauncherDraggable(launcher) {
   let drag = null;
-  let suppressClickUntil = 0;
+  for (const type of ['pointerdown', 'touchstart', 'pointerup', 'click']) {
+    try { launcher.addEventListener(type, event => recordEntryEvent('launcher', event, 'observe'), { passive: true, capture: true }); }
+    catch (error) { launcher.addEventListener(type, event => recordEntryEvent('launcher', event, 'observe'), true); }
+  }
   launcher.addEventListener('pointerdown', event => {
     if (event.button !== 0) return;
     const rect = launcher.getBoundingClientRect();
@@ -2624,13 +2981,15 @@ function makeLauncherDraggable(launcher) {
   const finishDrag = (event, cancelled = false) => {
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (drag.moved) {
-      suppressClickUntil = Date.now() + 350;
+      lastActivationAt = Date.now();
+      lastActivationSource = 'launcher-drag';
       const rect = launcher.getBoundingClientRect();
       getSettings().launcherPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
       ctx().saveSettingsDebounced?.();
-    } else if (!cancelled && (drag.pointerType === 'touch' || drag.pointerType === 'pen')) {
-      suppressClickUntil = Date.now() + 450;
-      void openJournal();
+    } else if (!cancelled) {
+      // Touch and pen never receive a trustworthy click on iOS, so pointerup is
+      // the activation path; the shared gate absorbs the synthetic click.
+      if (drag.pointerType === 'touch' || drag.pointerType === 'pen') activateJournalFromPointer(event, 'launcher');
     }
     try { launcher.releasePointerCapture?.(event.pointerId); } catch (error) { /* Pointer may already be released by the browser. */ }
     drag = null;
@@ -2638,11 +2997,10 @@ function makeLauncherDraggable(launcher) {
   launcher.addEventListener('pointerup', event => finishDrag(event, false));
   launcher.addEventListener('pointercancel', event => finishDrag(event, true));
   launcher.addEventListener('click', event => {
-    if (Date.now() < suppressClickUntil) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }
-  }, true);
+    event.preventDefault();
+    if (drag?.moved) return;
+    activateJournalFromPointer(event, 'launcher');
+  });
   const repositionLauncher = () => applyLauncherPosition(launcher);
   window.addEventListener('resize', repositionLauncher);
   registerCleanup(() => window.removeEventListener('resize', repositionLauncher));
@@ -2664,10 +3022,8 @@ function installWandMenuEntry() {
   entry.dataset.privateJournalEntry = 'wand';
   entry.dataset.privateJournalInstance = INSTANCE_ID;
   entry.innerHTML = '<div class="fa-solid fa-book-open extensionsMenuExtensionButton"></div><span>私语手札</span>';
-  entry.addEventListener('click', event => {
-    event.preventDefault();
-    void openJournal();
-  });
+  entry.style.cursor = 'pointer';
+  bindJournalActivation(entry, 'wand-entry');
   menu.append(entry);
   return true;
 }
@@ -2689,10 +3045,7 @@ function installExtensionDrawerEntry() {
     <span class="pj-extension-entry-copy"><strong>私语手札</strong><small>打开当前聊天的私人手札</small></span>
     <span class="fa-solid fa-chevron-right" aria-hidden="true"></span>
   </button>`;
-  entry.querySelector('button')?.addEventListener('click', event => {
-    event.preventDefault();
-    void openJournal();
-  });
+  bindJournalActivation(entry.querySelector('button'), 'drawer-entry');
   extensionsDrawer.prepend(entry);
   return true;
 }
@@ -2720,19 +3073,61 @@ function installJournalMenuEntries() {
   bindCurrentWandButton();
 }
 
+function clearQueuedMenuInstall() {
+  const cancel = cancelQueuedMenuInstall;
+  menuInstallFrame = null;
+  cancelQueuedMenuInstall = null;
+  try { cancel?.(); } catch (error) { console.warn(`[Private Journal v${PLUGIN_VERSION}] menu queue cleanup failed`, error); }
+}
+
 function queueJournalMenuEntries() {
   if (menuInstallFrame !== null) return;
-  const schedule = window.requestAnimationFrame || (callback => setTimeout(callback, 0));
-  menuInstallFrame = schedule(() => {
+  const sinceLast = Date.now() - lastMenuInstallAt;
+  if (sinceLast < MENU_INSTALL_MIN_INTERVAL_MS) {
+    const handle = setTimeout(() => {
+      menuInstallFrame = null;
+      cancelQueuedMenuInstall = null;
+      lastMenuInstallAt = Date.now();
+      installJournalMenuEntries();
+    }, MENU_INSTALL_MIN_INTERVAL_MS - sinceLast);
+    menuInstallFrame = handle;
+    cancelQueuedMenuInstall = () => clearTimeout(handle);
+    return;
+  }
+  if (typeof window.requestAnimationFrame !== 'function') {
+    const handle = setTimeout(() => {
+      menuInstallFrame = null;
+      cancelQueuedMenuInstall = null;
+      lastMenuInstallAt = Date.now();
+      installJournalMenuEntries();
+    }, 0);
+    menuInstallFrame = handle;
+    cancelQueuedMenuInstall = () => clearTimeout(handle);
+    return;
+  }
+  const handle = window.requestAnimationFrame(() => {
     menuInstallFrame = null;
+    cancelQueuedMenuInstall = null;
+    lastMenuInstallAt = Date.now();
     installJournalMenuEntries();
   });
+  menuInstallFrame = handle;
+  cancelQueuedMenuInstall = () => window.cancelAnimationFrame?.(handle);
 }
 
 function watchWandMenuEntry() {
   installJournalMenuEntries();
   if (wandMenuObserver || typeof MutationObserver !== 'function') return;
-  wandMenuObserver = new MutationObserver(() => queueJournalMenuEntries());
+  wandMenuObserver = new MutationObserver(records => {
+    // Ignore our own DOM, otherwise opening the journal re-enters this observer
+    // through its own class changes and rescans the document every frame.
+    for (const record of records) {
+      const node = record.target;
+      if (node?.closest?.('#private-journal,#private-journal-launcher,#private-journal-quote-capture')) continue;
+      queueJournalMenuEntries();
+      return;
+    }
+  });
   wandMenuObserver.observe(document.body, {
     childList: true,
     subtree: true,
@@ -2751,7 +3146,7 @@ function bindContextEvent(eventSource, eventName, handler) {
 }
 
 function removeJournalDomArtifacts() {
-  document.querySelectorAll([
+  const doomed = [...document.querySelectorAll([
     '#private-journal',
     '#private-journal-launcher',
     '#private-journal-quote-capture',
@@ -2759,10 +3154,22 @@ function removeJournalDomArtifacts() {
     '#private-journal-extension-entry',
     '[data-private-journal-owned]',
     '[data-private-journal-entry]',
-  ].join(',')).forEach(element => element.remove());
+  ].join(','))];
+  const foreign = doomed.filter(element => element.dataset?.privateJournalInstance
+    && element.dataset.privateJournalInstance !== INSTANCE_ID);
+  trace('removeJournalDomArtifacts', {
+    removed: doomed.length,
+    removedForeign: foreign.length,
+    victims: doomed.slice(0, 8).map(describeNode),
+  });
+  if (foreign.length) {
+    console.warn(`[PJ ${PLUGIN_VERSION}] removing DOM owned by another instance`, foreign.map(describeNode));
+  }
+  doomed.forEach(element => element.remove());
 }
 
-function cleanupPluginInstance() {
+function cleanupPluginInstance(reason = 'unspecified') {
+  trace('cleanupPluginInstance', { reason, hadRoot: Boolean(root), revision: initializationRevision });
   initializationRevision += 1;
   bookLoadRevision += 1;
   clearTimeout(autoGenerationTimer);
@@ -2770,11 +3177,7 @@ function cleanupPluginInstance() {
   clearTimeout(pageTurnSwapTimer);
   clearTimeout(quoteSelectionRefreshTimer);
   clearTimeout(quoteSelectionHideTimer);
-  if (menuInstallFrame !== null) {
-    const cancel = window.cancelAnimationFrame || clearTimeout;
-    cancel(menuInstallFrame);
-    menuInstallFrame = null;
-  }
+  clearQueuedMenuInstall();
   wandMenuObserver?.disconnect?.();
   wandMenuObserver = null;
   unbindWandButton();
@@ -2787,10 +3190,11 @@ function cleanupPluginInstance() {
   root = null;
 }
 
-async function initialize() {
-  cleanupPluginInstance();
+async function initialize({ reason = 'bootstrap' } = {}) {
+  cleanupPluginInstance(`initialize:${reason}`);
   const thisInitialization = ++initializationRevision;
   try {
+    trace('initialize:start', { reason, revision: thisInitialization, assetBase: extensionAssetBaseInfo });
     logLifecycle('initialize:start');
     const settings = getSettings();
     root = document.createElement('section');
@@ -2799,6 +3203,8 @@ async function initialize() {
     root.dataset.privateJournalInstance = INSTANCE_ID;
     root.dataset.pluginVersion = PLUGIN_VERSION;
     root.lang = settings.language || 'zh-CN';
+    // Never let a missing stylesheet dump the unstyled overlay into the page.
+    root.style.display = 'none';
     root.innerHTML = `<div class="pj-backdrop" data-action="close"><img class="pj-desk-art" src="${escapeHtml(deskAssetUrl(settings.desk))}" alt="" draggable="false"></div><div class="pj-scene">
     <div class="pj-storage-notice" role="alert" aria-live="assertive" hidden></div>
     <button class="pj-scene-close" data-action="close" aria-label="关闭私语手札" title="关闭">×</button>
@@ -2834,10 +3240,11 @@ async function initialize() {
     launcher.title = `打开私语手札 v${PLUGIN_VERSION}`;
     launcher.textContent = '❦';
     makeLauncherDraggable(launcher);
-    launcher.addEventListener('click', () => void openJournal());
     document.body.append(launcher);
     watchWandMenuEntry();
     render();
+    reportStylesheetHealth('initialize');
+    trace('initialize:dom-ready', { rootInstance: INSTANCE_ID, assetBase: extensionAssetBaseInfo });
 
     const context = ctx();
     const eventSource = context.eventSource;
@@ -2874,23 +3281,31 @@ async function initialize() {
     return true;
   } catch (error) {
     logLifecycle('initialize:failed', error);
+    trace('initialize:failed', { message: String(error?.message || error) });
     safeToastr('error', `私语手札 v${PLUGIN_VERSION} 初始化失败：${error?.message || error}`);
-    cleanupPluginInstance();
+    cleanupPluginInstance('initialize:failed');
     return false;
   }
 }
 
 const previousRuntime = window[RUNTIME_KEY];
 if (previousRuntime && previousRuntime.instanceId !== INSTANCE_ID) {
-  try { previousRuntime.dispose?.(); } catch (error) { console.warn(`[Private Journal v${PLUGIN_VERSION}] stale runtime cleanup failed`, error); }
+  trace('runtime:superseding', { previousInstanceId: previousRuntime.instanceId, previousVersion: previousRuntime.version });
+  try { previousRuntime.dispose?.('superseded-by-new-runtime'); } catch (error) { console.warn(`[Private Journal v${PLUGIN_VERSION}] stale runtime cleanup failed`, error); }
 }
 window[RUNTIME_KEY] = {
   version: PLUGIN_VERSION,
   instanceId: INSTANCE_ID,
-  openJournal: () => openJournal(),
-  initialize: () => initialize(),
-  dispose: () => cleanupPluginInstance(),
+  openJournal: () => openJournal({ source: 'runtime-api' }),
+  initialize: () => initialize({ reason: 'runtime-api' }),
+  dispose: reason => cleanupPluginInstance(reason || 'runtime-api'),
   diagnostics: () => diagnosticSnapshot(),
+  probeOverlay: () => probeOverlay('manual'),
+  stylesheet: () => inspectStylesheet(),
+  assets: () => ({ ...extensionAssetBaseInfo, attempts: extensionScriptInfo.attempts }),
+  trace: () => traceLog.slice(),
+  entryLog: () => traceLog.filter(record => String(record.stage).startsWith('entry')),
+  report: () => journalSelfReport(),
   ...(window.__PRIVATE_JOURNAL_TEST_CONFIG__ ? {
     test: {
       setCalendarAndSave: async (dateKey, emoji) => {

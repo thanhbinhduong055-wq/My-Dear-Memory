@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ST 1.18.0 mobile harness</title>
+<style>
+  /* Minimal stand-in for SillyTavern's own layout. */
+  html,body{margin:0;padding:0;height:100%;background:#1b1b1f;color:#ddd;font-family:sans-serif;}
+  #top-bar{position:fixed;top:0;left:0;right:0;height:36px;background:#2a2a30;z-index:3000;}
+  #sheld{position:absolute;inset:36px 0 44px 0;overflow:auto;}
+  #send_form{position:fixed;left:0;right:0;bottom:0;height:44px;background:#2a2a30;z-index:3000;}
+  #extensionsMenuButton{position:fixed;right:8px;bottom:6px;width:36px;height:36px;background:#444;z-index:3100;border-radius:6px;}
+  #extensionsMenu{position:fixed;right:8px;bottom:48px;width:220px;background:#33333a;z-index:3200;padding:6px;border-radius:8px;}
+  #extensionsMenu.closed{display:none;}
+  .list-group-item{padding:10px;cursor:pointer;}
+  #rm_extensions_block{position:fixed;inset:36px 0 44px 0;background:#232329;overflow:auto;z-index:2900;}
+  #rm_extensions_block.closed{display:none;}
+</style>
+<script>(function(){var src=new URLSearchParams(location.search).get("src")||"plugin";var css=new URLSearchParams(location.search).get("css");if(css==="none")return;var l=document.createElement("link");l.rel="stylesheet";l.href="/"+(css||src)+"/style.css";document.head.appendChild(l);})();</script>
+</head>
+<body>
+<div id="top-bar"></div>
+<div id="sheld"><div id="chat"><div class="mes" mesid="0"><div class="mes_text">你好呀。</div></div></div></div>
+<div id="send_form"></div>
+<div id="extensionsMenuButton" class="fa-solid fa-magic-wand-sparkles"></div>
+<div id="extensionsMenu" class="options-content closed"></div>
+<div id="rm_extensions_block" class="closed">
+  <div id="extensions_settings"></div>
+  <div id="extensions_settings2"></div>
+</div>
+<script src="/harness/localforage-stub.js"></script>
+<script src="/harness/st-shim.js"></script>
+</body></html>
