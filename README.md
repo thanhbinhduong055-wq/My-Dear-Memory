@@ -18,7 +18,7 @@
 - 封面页左上角的装帧材料盘分为“封面”和“桌面”两排，可独立选择、任意组合；封面围绕书脊自然翻开，栏目切换由一张独立纸页在 620ms 内绕书脊翻过，内容只做轻微明暗衔接，不再整页闪灭或出现横穿书本的扫描条
 - 内页采用宋体/思源宋体为正文、中文无衬线体为界面标签，正文不低于 16px，并以舒适版心、段落间距和清晰的标题层级呈现
 - 生成语气会同时参考 User Persona 和聊天里 User 的真实措辞习惯，包括句长、克制程度、情绪强度、幽默与称呼方式
-- 生成接口可自主切换“跟随正文 API”或“副 API”；副 API 先按 API 名称（OpenRouter、Claude、OpenAI、Gemini 等）筛选，再选择该 API 下已保存的 SillyTavern 连接配置，最后完整拉取模型列表。模型尚未拉取时也可手动填写模型 ID；整个选择面板在手机端限制为 286px 宽、360px 高
+- 生成接口可自主切换“跟随正文 API”或“副 API”；副 API 先按 API 名称（OpenRouter、Claude、OpenAI、Gemini 等）筛选，再选择该 API 下已保存的 SillyTavern 连接配置，最后完整拉取模型列表。模型尚未拉取时也可手动填写模型 ID；整个选择面板在手机端限制为 260px 宽、340px 高
 - 可开启“按故事日自动整理”：普通同日续写只累计内容，不调用手札 API；明确日期变化或“次日、一个月后、数周后”等跨日/跨阶段标记出现时，才追加一次 API 请求，按真实时间范围批量同步印象、相处日记、情书、关系状态和已解锁的恋爱日记
 - 长时间跨度会将起止时间与估算天数交给模型；有多个明确剧情阶段时，同一栏目可在单次响应中保存最多三页，空白日期不会被强行编造
 - 正文仍在生成时，手动请求会排队到正文结束，不抢占主生成状态
@@ -28,7 +28,7 @@
 - 按“角色 / 群组 + 当前聊天”隔离保存
 - 文字手札与心情月历在第一次真实修改时写入 LocalForage 本地恢复层和 SillyTavern 当前聊天的 `chatMetadata`；仅打开空手札不会强制创建 IndexedDB 记录，同一 SillyTavern 服务端/账号在另一台设备打开该聊天时仍可自动恢复
 - 每本手札同时保存主记录与本地恢复快照；异步加载使用固定聊天键并拒绝过期结果，重新打开时会合并、去重历史页面，避免切换聊天或加载重叠导致印象与相处日记被旧数据覆盖
-- 桌面和移动端响应式手札界面；右下角 `❦` 入口可拖动并记忆位置，也可从输入框左下角的 SillyTavern 魔法棒菜单，或 SillyTavern“扩展”抽屉中的固定“私语手札”入口打开；入口同时监听 Pointer、Click 与纯 Touch 手势，点击后先同步显示外框，强制布局诊断与 LocalForage 读取都延后执行，永久 pending 会在 3 秒后进入临时会话模式
+- 桌面和移动端响应式手札界面；右下角 `❦` 入口可拖动并记忆位置，也可从输入框左下角的 SillyTavern 魔法棒菜单，或 SillyTavern“扩展”抽屉中的固定“私语手札”入口打开；入口同时监听 Pointer、Click 与纯 Touch 手势，手札会进入浏览器原生顶层对话框，避免被云酒馆的全屏抽屉或宿主浮层盖住；只有确认可见后才隐藏入口，强制布局诊断与 LocalForage 读取都延后执行
 - 魔法棒菜单、扩展抽屉与悬浮入口采用幂等生命周期管理：扩展热更新、重新启用或抽屉 DOM 重建时会清除旧节点和旧 handler，并把唯一入口重新挂到当前可见容器
 - LocalForage 缺失、IndexedDB 缺失、读写拒绝或超时时，手札仍可打开；页面顶部会醒目标注“临时会话模式 · 本机不会保存”，并提示立即导出备份。插件不会把大型 Base64 内容静默回退到 `localStorage`
 - 手机端翻开后改为适配视口的居中单页，不再压缩 980px 桌面双页；正文独立滚动，安全区、刘海屏与横竖屏均保留页面边距
@@ -42,11 +42,11 @@
 3. 粘贴 Git 仓库 URL 并安装。
 4. 打开任意角色聊天，点击或拖动右下角酒红色 `❦` 按钮；也可以在魔法棒菜单，或“扩展”抽屉中点击“私语手札”。
 
-运行版本会显示在手札内页底部，例如 `v0.21.0`；浏览器控制台也会打印 `[Private Journal v0.21.0] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。`manifest.json` 中的 JS/CSS 路径也带有 `v=0.21.0` 缓存戳，避免手机继续读取旧版资源。
+运行版本会显示在手札内页底部，例如 `v0.21.1`；浏览器控制台也会打印 `[Private Journal v0.21.1] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。`manifest.json` 中的 JS/CSS 路径也带有 `v=0.21.1` 缓存戳，避免手机继续读取旧版资源。
 
 本地开发时，也可把整个目录放入 SillyTavern 的 `data/<user-handle>/extensions/`，或安装为所有用户后放到 `public/scripts/extensions/third-party/` 对应目录。
 
-## 手机端排障（0.21.0）
+## 手机端排障（0.21.1）
 
 先在手机浏览器 Console 里跑这一行，它会直接给出 A–E 判定：
 
@@ -70,7 +70,7 @@ window.__stPrivateJournalRuntime.report()
 其他可用入口：
 
 ```js
-window.__stPrivateJournalRuntime.version        // 必须是 0.21.0，否则是缓存/安装问题
+window.__stPrivateJournalRuntime.version        // 必须是 0.21.1，否则是缓存/安装问题
 window.__stPrivateJournalRuntime.openJournal()  // 绕开所有入口直接打开
 window.__stPrivateJournalRuntime.probeOverlay() // computed style + rect + elementsFromPoint
 window.__stPrivateJournalRuntime.stylesheet()   // CSS 版本标记比对
