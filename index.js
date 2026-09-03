@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.21.0';
+const PLUGIN_VERSION = '0.21.1';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2836,10 +2836,7 @@ function bind() {
       renderAccessories();
     }
     if (action === 'close') {
-      root.classList.remove('open');
-      root.style.display = 'none';
-      const launcher = document.querySelector('#private-journal-launcher');
-      if (launcher) launcher.hidden = false;
+      closeJournalSurface();
       bookOpen = false;
       renderAccessories();
     }
@@ -2989,6 +2986,62 @@ function bind() {
   });
 }
 
+function setLauncherHidden(hidden) {
+  const launcher = document.querySelector('#private-journal-launcher');
+  if (launcher) launcher.hidden = Boolean(hidden);
+}
+
+function showJournalSurface(source = 'api') {
+  // Re-append before opening so the non-dialog fallback is also the newest
+  // stacking sibling in embedded/cloud shells.
+  root.parentElement?.append?.(root);
+  root.classList.add('open');
+  const viewportHeight = globalThis.CSS?.supports?.('height', '100dvh') ? '100dvh' : '100vh';
+  // Safety-net geometry for stale or partially loaded extension CSS. The full
+  // appearance still comes from style.css.
+  Object.assign(root.style, {
+    display: 'block',
+    position: 'fixed',
+    inset: '0px',
+    width: '100vw',
+    height: viewportHeight,
+    maxWidth: 'none',
+    maxHeight: 'none',
+    margin: '0px',
+    padding: '0px',
+    border: '0px',
+    visibility: 'visible',
+    opacity: '1',
+    pointerEvents: 'auto',
+    zIndex: '2147483647',
+  });
+  let topLayer = false;
+  if (root.tagName === 'DIALOG' && typeof root.showModal === 'function') {
+    try {
+      if (!root.open) root.showModal();
+      topLayer = Boolean(root.open);
+    } catch (error) {
+      logLifecycle('openJournal:show-modal-failed', error, { source });
+    }
+  }
+  trace('openJournal:surface', { source, topLayer, tagName: root.tagName, dialogOpen: Boolean(root.open) });
+  return topLayer;
+}
+
+function closeJournalSurface({ restoreLauncher = true } = {}) {
+  if (!root) return;
+  root.classList.remove('open');
+  if (root.tagName === 'DIALOG' && root.open && typeof root.close === 'function') {
+    try { root.close(); } catch (error) { logLifecycle('closeJournal:dialog-close-failed', error); }
+  }
+  root.style.display = 'none';
+  // Closing ends the previous activation cycle; otherwise an immediate reopen
+  // is incorrectly discarded by the touch/click de-duplication gate.
+  lastActivationAt = 0;
+  lastActivationSource = '';
+  if (restoreLauncher) setLauncherHidden(false);
+}
+
 async function openJournal({ source = 'api' } = {}) {
   trace('openJournal:enter', {
     source,
@@ -3003,19 +3056,24 @@ async function openJournal({ source = 'api' } = {}) {
     return false;
   }
   // This must remain the first user-visible operation. Storage is deliberately background-only.
-  root.classList.add('open');
-  // Inline display so the overlay still obeys JS when style.css is stale or absent.
-  root.style.display = 'block';
+  const topLayer = showJournalSurface(source);
   const raf = window.requestAnimationFrame || (callback => setTimeout(callback, 16));
   const openingRoot = root;
   // Geometry/style probes force synchronous layout on mobile WebKit. Keep the
   // diagnostics, but never make the tap handler wait for them.
   raf(() => {
-    probeOverlay('after-open');
+    const report = probeOverlay('after-open');
+    if (report?.verdict === 'visible') {
+      setLauncherHidden(true);
+    } else {
+      setLauncherHidden(false);
+      safeToastr('error', `手札已启动但未能显示（${report?.verdict || 'unknown'}）。请截取控制台中的 Private Journal 诊断信息。`);
+    }
     raf(() => probeOverlay('after-open-frame'));
   });
-  const launcher = document.querySelector('#private-journal-launcher');
-  if (launcher) launcher.hidden = true;
+  // showModal() puts the journal in the browser top layer synchronously. Older
+  // fallback browsers keep the launcher until the first-frame probe succeeds.
+  if (topLayer) setLauncherHidden(true);
   raf(() => {
     if (root !== openingRoot || !openingRoot.isConnected || !openingRoot.classList.contains('open')) return;
     bookOpen = false;
@@ -3401,7 +3459,7 @@ async function initialize({ reason = 'bootstrap' } = {}) {
     trace('initialize:start', { reason, revision: thisInitialization, assetBase: extensionAssetBaseInfo });
     logLifecycle('initialize:start');
     const settings = getSettings();
-    root = document.createElement('section');
+    root = document.createElement('dialog');
     root.id = 'private-journal';
     root.dataset.privateJournalOwned = 'root';
     root.dataset.privateJournalInstance = INSTANCE_ID;
@@ -3431,6 +3489,15 @@ async function initialize({ reason = 'bootstrap' } = {}) {
     </div>
   </div>`;
     document.body.append(root);
+    const initializedRoot = root;
+    const cancelJournal = event => {
+      event.preventDefault();
+      closeJournalSurface();
+      bookOpen = false;
+      renderAccessories();
+    };
+    initializedRoot.addEventListener('cancel', cancelJournal);
+    registerCleanup(() => initializedRoot.removeEventListener('cancel', cancelJournal));
     currentBook = blankBook();
     currentBookStorageKey = storageKey();
     bind();
