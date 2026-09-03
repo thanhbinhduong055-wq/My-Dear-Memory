@@ -58,6 +58,11 @@
       timeline: {}, calendar: { entries: {} }, pages: [],
     };
     const memory = new Map();
+    const connectionProfiles = [
+      { id: 'or-a', api: 'openrouter', name: 'OpenRouter 手札', model: 'model-0', 'secret-id': 'or-secret' },
+      { id: 'or-b', api: 'openrouter', name: 'OpenRouter 备用', model: 'model-1', 'secret-id': 'or-secret-2' },
+      { id: 'claude-a', api: 'claude', name: 'Claude 手札', model: 'claude-sonnet', 'secret-id': 'claude-secret' },
+    ];
     const localforage = {
       getItem: async key => {
         if (storageMode === 'reject-read') throw new Error('测试读取失败');
@@ -84,12 +89,26 @@
       saveMetadata: async () => undefined, saveSettingsDebounced() {},
       generateQuietPrompt: async () => { window.__PJ_MODEL_CALLS += 1; return ''; },
     };
+    context.ConnectionManagerRequestService = {
+      getSupportedProfiles: () => connectionProfiles,
+      validateProfile: profile => ({ selected: 'openai', source: profile.api }),
+      sendRequest: async () => ({ content: '测试返回' }),
+    };
     window.SillyTavern = { version: '1.18.0', getContext: () => context, libs: {} };
     if (storageMode !== 'missing') window.SillyTavern.libs.localforage = localforage;
     window.toastr = Object.fromEntries(['success','info','warning','error'].map(level => [level, (message, title) => {
       window.__PJ_TOASTS.push({ level, message, title });
     }]));
     window.confirm = () => true;
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (String(input).startsWith('/api/backends/chat-completions/status')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          data: { data: Array.from({ length: 1203 }, (_, index) => ({ id: `model-${index}` })) },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      return nativeFetch(input, init);
+    };
 
     window.__PJ_TEST__ = {
       async settle(ms = 120) { await new Promise(resolve => setTimeout(resolve, ms)); },
@@ -118,8 +137,50 @@
       async rebuildDrawer(id = 'extensions_settings2') {
         document.querySelectorAll('#extensions_settings,#extensions_settings2').forEach(element => element.remove());
         appendDrawer(id, true);
-        await this.settle();
+        // Entry remounts are intentionally throttled to 250ms during DOM churn.
+        await this.settle(340);
         return this.state();
+      },
+      async touchOnlyActivate(selector) {
+        const target = document.querySelector(selector);
+        if (!target) throw new Error(`找不到触摸目标：${selector}`);
+        target.dispatchEvent(new Event('touchstart', { bubbles: true, cancelable: true }));
+        target.dispatchEvent(new Event('touchend', { bubbles: true, cancelable: true }));
+        await this.settle(20);
+        return this.state();
+      },
+      async exerciseApiPicker() {
+        await window.__stPrivateJournalRuntime.openJournal({ source: 'api-picker-test' });
+        await this.settle(40);
+        let details = document.querySelector('.pj-api-router');
+        details.open = true;
+        const secondary = details.querySelector('[data-setting="generationApiMode"][value="secondary"]');
+        secondary.checked = true;
+        secondary.dispatchEvent(new Event('change', { bubbles: true }));
+        details = document.querySelector('.pj-api-router');
+        details.open = true;
+        const api = details.querySelector('[data-setting="secondaryApiKey"]');
+        api.value = 'openrouter';
+        api.dispatchEvent(new Event('change', { bubbles: true }));
+        details = document.querySelector('.pj-api-router');
+        details.open = true;
+        const profile = details.querySelector('[data-setting="secondaryProfileId"]');
+        details.querySelector('[data-action="fetch-secondary-models"]').click();
+        await this.settle(80);
+        details = document.querySelector('.pj-api-router');
+        details.open = true;
+        const model = details.querySelector('#pj-secondary-model');
+        const popover = details.querySelector('.pj-api-popover').getBoundingClientRect();
+        return {
+          apiOptions: details.querySelector('[data-setting="secondaryApiKey"]').options.length,
+          apiValue: context.extensionSettings.st_private_journal.secondaryApiKey,
+          profileOptions: profile.options.length,
+          profileValue: context.extensionSettings.st_private_journal.secondaryProfileId,
+          modelTag: model.tagName,
+          modelOptions: model.options?.length || 0,
+          panelWidth: popover.width,
+          panelHeight: popover.height,
+        };
       },
       state() {
         const root = document.querySelector('#private-journal');

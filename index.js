@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.20.0';
+const PLUGIN_VERSION = '0.21.0';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -87,6 +87,7 @@ function trace(stage, extra = {}) {
 }
 const STORAGE_READ_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageTimeoutMs) || 3000;
 const STORAGE_WRITE_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageWriteTimeoutMs) || 5000;
+const SECONDARY_MODEL_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.modelTimeoutMs) || 15000;
 const BOOK_VERSION = 10;
 const MAX_STICKER_BYTES = 700 * 1024;
 
@@ -96,6 +97,7 @@ const DEFAULTS = {
   theme: 'botanical-noir',
   desk: 'pearl-cream',
   generationApiMode: 'main',
+  secondaryApiKey: '',
   secondaryProfileId: '',
   secondaryModelId: '',
   launcherPosition: null,
@@ -282,10 +284,31 @@ function activateJournalFromPointer(event, source) {
 
 function bindJournalActivation(element, source) {
   if (!element?.addEventListener) return;
-  for (const type of ['pointerdown', 'touchstart', 'pointerup', 'click']) {
+  for (const type of ['pointerdown', 'touchstart', 'touchend', 'pointerup', 'click']) {
     try { element.addEventListener(type, event => recordEntryEvent(source, event, 'observe'), { passive: true, capture: true }); }
     catch (error) { element.addEventListener(type, event => recordEntryEvent(source, event, 'observe'), true); }
   }
+  let touchGesture = null;
+  element.addEventListener('touchstart', event => {
+    const touch = event.changedTouches?.[0] || event.touches?.[0];
+    touchGesture = touch
+      ? { startX: touch.clientX, startY: touch.clientY, moved: false }
+      : { startX: 0, startY: 0, moved: false };
+  }, { passive: true });
+  element.addEventListener('touchmove', event => {
+    if (!touchGesture) return;
+    const touch = event.changedTouches?.[0] || event.touches?.[0];
+    if (!touch) return;
+    if (Math.hypot(touch.clientX - touchGesture.startX, touch.clientY - touchGesture.startY) >= 14) touchGesture.moved = true;
+  }, { passive: true });
+  element.addEventListener('touchend', event => {
+    const shouldActivate = touchGesture && !touchGesture.moved;
+    touchGesture = null;
+    if (!shouldActivate || event.touches?.length) return;
+    event.preventDefault?.();
+    activateJournalFromPointer(event, source);
+  }, { passive: false });
+  element.addEventListener('touchcancel', () => { touchGesture = null; }, { passive: true });
   element.addEventListener('pointerup', event => {
     if (event.pointerType === 'mouse') return;
     if (event.isPrimary === false) return;
@@ -1495,6 +1518,96 @@ function profileDisplayName(profile) {
   return name || model || '未命名连接配置';
 }
 
+const SECONDARY_API_LABELS = Object.freeze({
+  openai: 'OpenAI',
+  claude: 'Claude / Anthropic',
+  anthropic: 'Claude / Anthropic',
+  openrouter: 'OpenRouter',
+  makersuite: 'Google AI Studio',
+  google: 'Google AI Studio',
+  vertexai: 'Google Vertex AI',
+  mistralai: 'Mistral AI',
+  cohere: 'Cohere',
+  perplexity: 'Perplexity',
+  groq: 'Groq',
+  deepseek: 'DeepSeek',
+  xai: 'xAI',
+  moonshot: 'Moonshot / Kimi',
+  zai: 'Z.AI / GLM',
+  siliconflow: 'SiliconFlow',
+  minimax: 'MiniMax',
+  nanogpt: 'NanoGPT',
+  chutes: 'Chutes',
+  electronhub: 'Electron Hub',
+  fireworks: 'Fireworks AI',
+  aimlapi: 'AI/ML API',
+  pollinations: 'Pollinations',
+  workers_ai: 'Cloudflare Workers AI',
+  custom: '自定义 OpenAI 兼容',
+  textgenerationwebui: 'Text Completion',
+  kobold: 'Kobold / KoboldCpp',
+  koboldcpp: 'KoboldCpp',
+  ollama: 'Ollama',
+  llamacpp: 'llama.cpp',
+  vllm: 'vLLM',
+  aphrodite: 'Aphrodite',
+  tabby: 'TabbyAPI',
+  ooba: 'Text Generation WebUI',
+});
+
+function profileApiKey(profile) {
+  return String(profile?.api || '').trim();
+}
+
+function profileApiDisplayName(profile) {
+  const key = profileApiKey(profile);
+  let apiMap = null;
+  try { apiMap = ctx().ConnectionManagerRequestService?.validateProfile?.(profile) || null; }
+  catch (error) { /* The raw profile API key is still useful for grouping. */ }
+  const candidates = [key, apiMap?.source, apiMap?.type]
+    .map(value => String(value || '').trim().toLowerCase())
+    .filter(Boolean);
+  for (const candidate of candidates) {
+    if (SECONDARY_API_LABELS[candidate]) return SECONDARY_API_LABELS[candidate];
+  }
+  return key
+    ? key.replace(/[_-]+/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase())
+    : '未命名 API';
+}
+
+function secondaryApiCatalog(profiles = secondaryProfiles()) {
+  const grouped = new Map();
+  for (const profile of profiles) {
+    const key = profileApiKey(profile);
+    if (!key) continue;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.profiles.push(profile);
+      continue;
+    }
+    grouped.set(key, { key, label: profileApiDisplayName(profile), count: 1, profiles: [profile] });
+  }
+  return [...grouped.values()].sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+}
+
+function profilesForSecondaryApi(apiKey, profiles = secondaryProfiles()) {
+  const key = String(apiKey || '').trim();
+  return key ? profiles.filter(profile => profileApiKey(profile) === key) : [];
+}
+
+function resolvedSecondarySelection(settings = getSettings(), profiles = secondaryProfiles()) {
+  const catalog = secondaryApiCatalog(profiles);
+  const storedProfile = profiles.find(profile => profile.id === settings.secondaryProfileId);
+  const availableKeys = new Set(catalog.map(item => item.key));
+  const apiKey = availableKeys.has(settings.secondaryApiKey)
+    ? settings.secondaryApiKey
+    : (availableKeys.has(profileApiKey(storedProfile)) ? profileApiKey(storedProfile) : (catalog[0]?.key || ''));
+  const apiProfiles = profilesForSecondaryApi(apiKey, profiles);
+  const selectedProfile = apiProfiles.find(profile => profile.id === settings.secondaryProfileId) || apiProfiles[0] || null;
+  return { catalog, apiKey, apiProfiles, selectedProfile };
+}
+
 function extractModelIds(payload) {
   const ids = [];
   const visited = new WeakSet();
@@ -1566,12 +1679,23 @@ async function fetchSecondaryModels(profileId = getSettings().secondaryProfileId
   } else {
     throw new Error('该连接类型暂不支持模型列表拉取');
   }
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers,
-    cache: 'no-cache',
-    body: JSON.stringify(body),
-  });
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), SECONDARY_MODEL_TIMEOUT_MS) : null;
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      cache: 'no-cache',
+      body: JSON.stringify(body),
+      signal: controller?.signal,
+    });
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error('模型列表请求超时，请检查该 API 连接');
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
   if (!response.ok) throw new Error(`模型列表请求失败（HTTP ${response.status}）`);
   const payload = await response.json();
   const models = extractModelIds(payload);
@@ -2584,22 +2708,28 @@ function renderApiRouter() {
   if (!host) return;
   const settings = getSettings();
   const profiles = secondaryProfiles();
-  const selectedProfile = profiles.find(profile => profile.id === settings.secondaryProfileId);
+  const { catalog, apiKey, apiProfiles, selectedProfile } = resolvedSecondarySelection(settings, profiles);
   const previousDetails = host.querySelector('.pj-api-router');
   const wasOpen = Boolean(previousDetails?.open);
   const mode = settings.generationApiMode === 'secondary' ? 'secondary' : 'main';
   const summary = mode === 'secondary'
-    ? `副 API · ${selectedProfile ? profileDisplayName(selectedProfile) : '未选择'}`
+    ? `副 API · ${catalog.find(item => item.key === apiKey)?.label || '未选择'}`
     : '跟随正文 API';
-  const options = profiles.length
-    ? profiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === settings.secondaryProfileId ? 'selected' : ''}>${escapeHtml(profileDisplayName(profile))}${profile.model && profile.model !== profileDisplayName(profile) ? ` · ${escapeHtml(profile.model)}` : ''}</option>`).join('')
-    : '<option value="">没有可用的连接配置</option>';
-  const availableModels = secondaryModelsProfileId === settings.secondaryProfileId
-    ? secondaryModelOptions
+  const apiOptions = catalog.length
+    ? `<option value="">选择 API 名称</option>${catalog.map(item => `<option value="${escapeHtml(item.key)}" ${item.key === apiKey ? 'selected' : ''}>${escapeHtml(item.label)}${item.count > 1 ? ` · ${item.count} 个配置` : ''}</option>`).join('')}`
+    : '<option value="">没有可用的 API</option>';
+  const profileOptions = apiProfiles.length
+    ? apiProfiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === selectedProfile?.id ? 'selected' : ''}>${escapeHtml(profileDisplayName(profile))}</option>`).join('')
+    : '<option value="">该 API 没有连接配置</option>';
+  const modelsFetched = secondaryModelsProfileId === selectedProfile?.id && secondaryModelOptions.length > 0;
+  const availableModels = modelsFetched
+    ? [settings.secondaryModelId, ...secondaryModelOptions].filter(Boolean)
     : [settings.secondaryModelId, selectedProfile?.model].filter(Boolean);
-  const modelOptions = [...new Set(availableModels)]
-    .map(model => `<option value="${escapeHtml(model)}"></option>`).join('');
-  const modelState = secondaryModelsProfileId === settings.secondaryProfileId && secondaryModelOptions.length
+  const modelOptions = [...new Set(availableModels)].map(model => `<option value="${escapeHtml(model)}" ${model === (settings.secondaryModelId || selectedProfile?.model) ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
+  const modelControl = modelsFetched
+    ? `<select id="pj-secondary-model" data-setting="secondaryModelId" aria-label="选择副 API 模型">${modelOptions}</select>`
+    : `<input id="pj-secondary-model" data-setting="secondaryModelId" value="${escapeHtml(settings.secondaryModelId || selectedProfile?.model || '')}" placeholder="模型 ID（可手动填写）">`;
+  const modelState = modelsFetched
     ? `已拉取 ${secondaryModelOptions.length} 个模型`
     : `当前配置：${selectedProfile?.model || '未指定模型'}`;
 
@@ -2607,15 +2737,17 @@ function renderApiRouter() {
     <summary><span>生成接口</span><strong>${escapeHtml(summary)}</strong></summary>
     <div class="pj-api-popover">
       <div class="pj-api-mode" role="radiogroup" aria-label="选择手札生成接口">
-        <label><input type="radio" name="pj-generation-api" data-setting="generationApiMode" value="main" ${mode === 'main' ? 'checked' : ''}><span><strong>跟随正文 API</strong><small>沿用当前角色回复的模型与设定</small></span></label>
-        <label><input type="radio" name="pj-generation-api" data-setting="generationApiMode" value="secondary" ${mode === 'secondary' ? 'checked' : ''}><span><strong>使用副 API</strong><small>从 SillyTavern 连接配置中选择</small></span></label>
+        <label><input type="radio" name="pj-generation-api" data-setting="generationApiMode" value="main" ${mode === 'main' ? 'checked' : ''}><span><strong>跟随正文</strong></span></label>
+        <label><input type="radio" name="pj-generation-api" data-setting="generationApiMode" value="secondary" ${mode === 'secondary' ? 'checked' : ''}><span><strong>使用副 API</strong></span></label>
       </div>
       <div class="pj-profile-picker" ${mode === 'main' ? 'hidden' : ''}>
-        <label for="pj-secondary-profile">副 API 连接配置</label>
-        <div><select id="pj-secondary-profile" data-setting="secondaryProfileId" ${profiles.length ? '' : 'disabled'}>${options}</select><button type="button" class="pj-text-button" data-action="refresh-api-profiles">刷新</button></div>
+        <label for="pj-secondary-api">API 名称</label>
+        <div class="pj-api-source-row"><select id="pj-secondary-api" data-setting="secondaryApiKey" ${catalog.length ? '' : 'disabled'}>${apiOptions}</select><button type="button" class="pj-text-button" data-action="refresh-api-profiles" title="刷新连接配置">刷新</button></div>
+        <label for="pj-secondary-profile">连接配置</label>
+        <select id="pj-secondary-profile" data-setting="secondaryProfileId" ${apiProfiles.length ? '' : 'disabled'}>${profileOptions}</select>
         <label for="pj-secondary-model">使用模型</label>
-        <div class="pj-model-picker"><input id="pj-secondary-model" data-setting="secondaryModelId" list="pj-secondary-model-list" value="${escapeHtml(settings.secondaryModelId || selectedProfile?.model || '')}" placeholder="选择或输入模型 ID"><datalist id="pj-secondary-model-list">${modelOptions}</datalist><button type="button" class="pj-text-button" data-action="fetch-secondary-models">拉取模型</button></div>
-        <p>${escapeHtml(modelState)}。模型列表通过 SillyTavern 服务端和该连接配置获取；密钥不会进入插件数据。</p>
+        <div class="pj-model-picker">${modelControl}<button type="button" class="pj-text-button" data-action="fetch-secondary-models" ${selectedProfile ? '' : 'disabled'}>拉取</button></div>
+        <p>${escapeHtml(modelState)} · 密钥仍由 SillyTavern 管理</p>
       </div>
     </div>
   </details>`;
@@ -2758,7 +2890,15 @@ function bind() {
       if (button) button.disabled = true;
       setStatus('正在从副 API 拉取模型…');
       try {
-        const models = await fetchSecondaryModels();
+        const profileId = root.querySelector('[data-setting="secondaryProfileId"]')?.value || '';
+        const profile = secondaryProfiles().find(item => item.id === profileId);
+        if (!profile) throw new Error('请先选择 API 名称和连接配置');
+        const settings = getSettings();
+        settings.secondaryApiKey = profileApiKey(profile);
+        settings.secondaryProfileId = profile.id;
+        if (!settings.secondaryModelId) settings.secondaryModelId = profile.model || '';
+        ctx().saveSettingsDebounced?.();
+        const models = await fetchSecondaryModels(profileId);
         setStatus(`已拉取 ${models.length} 个副 API 模型`);
         toastr.success(`已获取 ${models.length} 个模型，可在输入框中选择。`, '私语手札');
       } catch (error) {
@@ -2804,21 +2944,42 @@ function bind() {
       ctx().saveSettingsDebounced?.();
       setStatus(event.target.checked ? '已开启：故事跨日后一次整理全部栏目' : '已关闭自动整理');
     }
+    if (event.target.matches('[data-setting="secondaryModelId"]')) {
+      getSettings().secondaryModelId = event.target.value.trim();
+      ctx().saveSettingsDebounced?.();
+    }
     if (event.target.matches('[data-setting="generationApiMode"]')) {
       const mode = event.target.value === 'secondary' ? 'secondary' : 'main';
       const settings = getSettings();
       settings.generationApiMode = mode;
-      if (mode === 'secondary' && !settings.secondaryProfileId) {
-        settings.secondaryProfileId = secondaryProfiles()[0]?.id || '';
+      if (mode === 'secondary') {
+        const selection = resolvedSecondarySelection(settings);
+        settings.secondaryApiKey = selection.apiKey;
+        settings.secondaryProfileId = selection.selectedProfile?.id || '';
+        if (!settings.secondaryModelId) settings.secondaryModelId = selection.selectedProfile?.model || '';
       }
       ctx().saveSettingsDebounced?.();
       renderApiRouter();
       setStatus(mode === 'secondary' ? '手札将使用所选副 API' : '手札将跟随正文 API');
     }
+    if (event.target.matches('[data-setting="secondaryApiKey"]')) {
+      const settings = getSettings();
+      settings.secondaryApiKey = event.target.value;
+      const profile = profilesForSecondaryApi(settings.secondaryApiKey)[0] || null;
+      settings.secondaryProfileId = profile?.id || '';
+      settings.secondaryModelId = profile?.model || '';
+      secondaryModelsProfileId = '';
+      secondaryModelOptions = [];
+      ctx().saveSettingsDebounced?.();
+      renderApiRouter();
+      setStatus(profile ? `已选择 ${profileApiDisplayName(profile)}` : '请先在 SillyTavern 保存该 API 的连接配置');
+    }
     if (event.target.matches('[data-setting="secondaryProfileId"]')) {
       const settings = getSettings();
       settings.secondaryProfileId = event.target.value;
-      settings.secondaryModelId = secondaryProfiles().find(profile => profile.id === event.target.value)?.model || '';
+      const profile = secondaryProfiles().find(profile => profile.id === event.target.value);
+      settings.secondaryApiKey = profileApiKey(profile) || settings.secondaryApiKey;
+      settings.secondaryModelId = profile?.model || '';
       secondaryModelsProfileId = '';
       secondaryModelOptions = [];
       ctx().saveSettingsDebounced?.();
@@ -2845,10 +3006,14 @@ async function openJournal({ source = 'api' } = {}) {
   root.classList.add('open');
   // Inline display so the overlay still obeys JS when style.css is stale or absent.
   root.style.display = 'block';
-  probeOverlay('after-open');
   const raf = window.requestAnimationFrame || (callback => setTimeout(callback, 16));
   const openingRoot = root;
-  raf(() => raf(() => probeOverlay('after-open-frame')));
+  // Geometry/style probes force synchronous layout on mobile WebKit. Keep the
+  // diagnostics, but never make the tap handler wait for them.
+  raf(() => {
+    probeOverlay('after-open');
+    raf(() => probeOverlay('after-open-frame'));
+  });
   const launcher = document.querySelector('#private-journal-launcher');
   if (launcher) launcher.hidden = true;
   raf(() => {
@@ -2953,7 +3118,8 @@ function launcherDragThreshold(pointerType) {
 
 function makeLauncherDraggable(launcher) {
   let drag = null;
-  for (const type of ['pointerdown', 'touchstart', 'pointerup', 'click']) {
+  let touchDrag = null;
+  for (const type of ['pointerdown', 'touchstart', 'touchend', 'pointerup', 'click']) {
     try { launcher.addEventListener(type, event => recordEntryEvent('launcher', event, 'observe'), { passive: true, capture: true }); }
     catch (error) { launcher.addEventListener(type, event => recordEntryEvent('launcher', event, 'observe'), true); }
   }
@@ -2996,6 +3162,44 @@ function makeLauncherDraggable(launcher) {
   };
   launcher.addEventListener('pointerup', event => finishDrag(event, false));
   launcher.addEventListener('pointercancel', event => finishDrag(event, true));
+  launcher.addEventListener('touchstart', event => {
+    const touch = event.changedTouches?.[0] || event.touches?.[0];
+    if (!touch) return;
+    const rect = launcher.getBoundingClientRect();
+    touchDrag = { startX: touch.clientX, startY: touch.clientY, left: rect.left, top: rect.top, moved: false };
+  }, { passive: true });
+  launcher.addEventListener('touchmove', event => {
+    if (!touchDrag) return;
+    const touch = event.changedTouches?.[0] || event.touches?.[0];
+    if (!touch) return;
+    const dx = touch.clientX - touchDrag.startX;
+    const dy = touch.clientY - touchDrag.startY;
+    if (!touchDrag.moved && Math.hypot(dx, dy) < launcherDragThreshold('touch')) return;
+    touchDrag.moved = true;
+    event.preventDefault();
+    const rect = launcher.getBoundingClientRect();
+    const x = Math.min(Math.max(8, touchDrag.left + dx), Math.max(8, window.innerWidth - rect.width - 8));
+    const y = Math.min(Math.max(8, touchDrag.top + dy), Math.max(8, window.innerHeight - rect.height - 8));
+    launcher.style.left = `${x}px`;
+    launcher.style.top = `${y}px`;
+    launcher.style.right = 'auto';
+    launcher.style.bottom = 'auto';
+  }, { passive: false });
+  launcher.addEventListener('touchend', event => {
+    if (!touchDrag) return;
+    if (touchDrag.moved) {
+      lastActivationAt = Date.now();
+      lastActivationSource = 'launcher-touch-drag';
+      const rect = launcher.getBoundingClientRect();
+      getSettings().launcherPosition = { x: Math.round(rect.left), y: Math.round(rect.top) };
+      ctx().saveSettingsDebounced?.();
+    } else if (!event.touches?.length) {
+      event.preventDefault();
+      activateJournalFromPointer(event, 'launcher');
+    }
+    touchDrag = null;
+  }, { passive: false });
+  launcher.addEventListener('touchcancel', () => { touchDrag = null; }, { passive: true });
   launcher.addEventListener('click', event => {
     event.preventDefault();
     if (drag?.moved) return;

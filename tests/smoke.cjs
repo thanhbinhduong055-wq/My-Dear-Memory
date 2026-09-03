@@ -25,7 +25,7 @@ const sandbox = {
   console,
   setTimeout,
   clearTimeout,
-  window: { crypto: {}, __PRIVATE_JOURNAL_TEST_CONFIG__: { storageTimeoutMs: 30 } },
+  window: { crypto: {}, __PRIVATE_JOURNAL_TEST_CONFIG__: { storageTimeoutMs: 30, modelTimeoutMs: 30 } },
   indexedDB: {},
   document: {
     readyState: 'loading',
@@ -45,6 +45,7 @@ const sandbox = {
   Uint8Array,
   DataView,
   ArrayBuffer,
+  AbortController,
   Math,
   Date,
 };
@@ -57,14 +58,15 @@ assert.equal(vm.runInContext('Object.keys(DESKS).length', sandbox), 5);
 assert.equal(vm.runInContext('DEFAULTS.theme', sandbox), 'botanical-noir');
 assert.equal(vm.runInContext('DEFAULTS.desk', sandbox), 'pearl-cream');
 assert.equal(vm.runInContext('DEFAULTS.generationApiMode', sandbox), 'main');
+assert.equal(vm.runInContext('DEFAULTS.secondaryApiKey', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
 assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
-assert.equal(manifest.version, '0.20.0');
+assert.equal(manifest.version, '0.21.0');
 assert.equal(vm.runInContext('PLUGIN_VERSION', sandbox), manifest.version);
 // JS and CSS are cached independently; the marker is what makes a stale
 // stylesheet detectable at runtime instead of silently breaking layout.
-assert.match(styleSource, /--pj-stylesheet-version:"0\.20\.0"/);
+assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.0"/);
 assert.equal(
   styleSource.match(/--pj-stylesheet-version:"([^"]+)"/)[1],
   manifest.version,
@@ -114,7 +116,9 @@ assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
 assert.match(source, /#extensions_settings,#extensions_settings2/);
 assert.match(source, /selectExtensionDrawerContainer/);
-assert.match(source, /PLUGIN_VERSION = '0\.20\.0'/);
+assert.match(source, /PLUGIN_VERSION = '0\.21\.0'/);
+assert.match(manifest.js, /\?v=0\.21\.0$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(manifest.css, /\?v=0\.21\.0$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
 assert.match(source, /privateJournalInstance/);
 assert.match(source, /initialize:failed/);
 assert.match(source, /safeToastr\('error', `私语手札 v\$\{PLUGIN_VERSION\} 初始化失败/);
@@ -136,9 +140,13 @@ assert.match(styleSource, /@keyframes pj-reader-sheet-forward[\s\S]*?rotateY\(-1
 assert.match(styleSource, /\.pj-page-turner::after/, '翻动纸张需要背页层次，而不是单层渐变条');
 assert.match(styleSource, /animation:pj-reader-sheet-forward \.62s cubic-bezier\(\.45,0,\.55,1\)/, '纸张应以对称缓动经过 90° 中点');
 assert.match(source, /\}, 310\);\s*\n\}/, '内容必须在纸张经过中点时交换');
-assert.match(styleSource, /\.pj-api-popover[^}]*width:min\(310px,calc\(100vw - 28px\)\)/, '副 API 面板不应过宽');
+assert.match(styleSource, /\.pj-api-popover[^}]*width:min\(286px,calc\(100vw - 20px\)\)/, '副 API 面板应收窄到紧凑尺寸');
 assert.match(styleSource, /\.pj-api-popover[^}]*box-sizing:border-box/, '副 API 面板宽度必须包含 padding 与边框');
-assert.match(styleSource, /\.pj-model-picker[^}]*max-width:260px/, '模型选择行应保持紧凑');
+assert.match(styleSource, /\.pj-api-popover[^}]*max-height:min\(360px,calc\(100dvh - 132px\)\)/, '副 API 面板必须限制高度并允许滚动');
+assert.match(styleSource, /\.pj-model-picker[^}]*max-width:100%/, '模型选择行应保持紧凑');
+assert.match(source, /data-setting="secondaryApiKey"/, '副 API 必须先由用户选择 API 名称');
+assert.match(source, /<select id="pj-secondary-model"/, '拉取后的模型必须用紧凑下拉框选择');
+assert.doesNotMatch(source, /<datalist id="pj-secondary-model-list"/, '模型选择不再使用会溢出的 datalist');
 assert.doesNotMatch(source, /\.slice\(0,\s*500\)/, '完整模型列表不得在渲染时硬截断为 500 个');
 const openJournalStart = source.indexOf('async function openJournal(');
 assert.ok(openJournalStart > 0, 'openJournal must exist');
@@ -148,16 +156,17 @@ assert.ok(
   openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("startBookLoad('open')"),
   '移动端点击后必须先显示手札，再等待 IndexedDB 加载',
 );
-// The overlay must not depend on style.css being fresh, and the visibility
-// probe must run on the same tick the class is applied.
+// The overlay must not depend on style.css being fresh. Expensive geometry
+// probes run on the next frame so a mobile tap never waits for forced layout.
 assert.ok(
   openJournalSource.indexOf("root.style.display = 'block'") < openJournalSource.indexOf("startBookLoad('open')"),
   '打开时必须直接设置 inline display，不能只依赖 .open 样式规则',
 );
 assert.ok(
-  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("probeOverlay('after-open')"),
-  'probeOverlay 必须在 add(open) 之后立即执行',
+  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("raf(() => {"),
+  '可见外框必须先出现，再调度下一帧诊断',
 );
+assert.match(openJournalSource, /raf\(\(\) => \{\s*probeOverlay\('after-open'\)/, '强制布局诊断必须延后到动画帧');
 assert.match(openJournalSource, /trace\('openJournal:enter'/);
 assert.doesNotMatch(openJournalSource, /await\s+(?:loadBook|storageRead|storageWrite)/);
 assert.doesNotMatch(openJournalSource, /generateQuietPrompt|callJournalApi|callCurrentMainApi|fetch\s*\(/, '打开手札不得触发任何模型 API');
@@ -171,6 +180,22 @@ const loadBookEnd = source.indexOf('\nfunction migrateBook', loadBookStart);
 assert.doesNotMatch(source.slice(loadBookStart, loadBookEnd), /saveSpecificBook|storageWrite/, '读取或打开空手札不得强制写数据库');
 assert.equal(vm.runInContext("launcherDragThreshold('touch')", sandbox), 14);
 assert.equal(vm.runInContext("launcherDragThreshold('mouse')", sandbox), 5);
+
+contextValue.ConnectionManagerRequestService = {
+  getSupportedProfiles: () => [
+    { id: 'openrouter-1', api: 'openrouter', name: 'OpenRouter 日记', model: 'or-model' },
+    { id: 'claude-1', api: 'claude', name: 'Claude 日记', model: 'claude-model' },
+    { id: 'openrouter-2', api: 'openrouter', name: 'OpenRouter 备用', model: 'or-model-2' },
+  ],
+  validateProfile: profile => profile.api === 'claude'
+    ? ({ selected: 'openai', source: 'claude' })
+    : ({ selected: 'openai', source: 'openrouter' }),
+};
+const apiCatalog = vm.runInContext('secondaryApiCatalog()', sandbox);
+assert.deepEqual(Array.from(apiCatalog, item => item.key), ['claude', 'openrouter']);
+assert.equal(apiCatalog.find(item => item.key === 'openrouter').count, 2);
+assert.equal(vm.runInContext("profilesForSecondaryApi('claude').length", sandbox), 1);
+assert.equal(vm.runInContext("profilesForSecondaryApi('openrouter').length", sandbox), 2);
 
 sandbox.mixedModelPayload = {
   data: { data: [{ id: 'alpha' }], models: [{ name: 'beta' }] },
@@ -658,6 +683,14 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   };
   const fetchedModels = await vm.runInContext(`fetchSecondaryModels('secondary-1')`, sandbox);
   assert.deepEqual(Array.from(fetchedModels), ['diary-model', 'diary-model-pro']);
+  sandbox.fetch = async (endpoint, options) => new Promise((resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+  });
+  await assert.rejects(
+    vm.runInContext(`fetchSecondaryModels('secondary-1')`, sandbox),
+    /模型列表请求超时/,
+    '副 API 模型接口永久 pending 时必须恢复按钮控制权',
+  );
   contextValue.extensionSettings.st_private_journal.generationApiMode = 'main';
 
   let batchApiCalls = 0;

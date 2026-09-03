@@ -71,6 +71,18 @@
         assert(api.state().open && elapsed < 100, `外框显示耗时 ${elapsed.toFixed(1)}ms`);
         assert(api.state().modelCalls === 0, '打开手札不应调用模型');
       });
+      await test('纯 touchstart/touchend 也能打开', 'storage=normal&drawers=settings2', async (win, api) => {
+        const state = await api.touchOnlyActivate('[data-private-journal-entry="wand"]');
+        assert(state.open, '无 PointerEvent 或合成 click 时，touchend 没有打开手札');
+        assert(state.modelCalls === 0, '触摸打开手札不应调用模型');
+      });
+      await test('副 API 名称筛选并完整拉取模型', 'storage=normal&drawers=settings2', async (win, api) => {
+        const state = await api.exerciseApiPicker();
+        assert(state.apiOptions === 3 && state.apiValue === 'openrouter', 'API 名称选择没有正确保存');
+        assert(state.profileOptions === 2 && /^or-/.test(state.profileValue), '连接配置没有按 API 名称过滤');
+        assert(state.modelTag === 'SELECT' && state.modelOptions === 1203, `模型下拉只显示了 ${state.modelOptions} 项`);
+        assert(state.panelWidth <= 286.5 && state.panelHeight <= 360.5, `副 API 面板仍过大：${state.panelWidth}×${state.panelHeight}`);
+      });
       await test('只有 #extensions_settings', 'storage=normal&drawers=settings', async (win, api) => {
         assert(api.state().drawerParent === 'extensions_settings', '入口未挂载到旧抽屉');
       });
