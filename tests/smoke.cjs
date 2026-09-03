@@ -62,11 +62,11 @@ assert.equal(vm.runInContext('DEFAULTS.secondaryApiKey', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
 assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
-assert.equal(manifest.version, '0.21.0');
+assert.equal(manifest.version, '0.21.1');
 assert.equal(vm.runInContext('PLUGIN_VERSION', sandbox), manifest.version);
 // JS and CSS are cached independently; the marker is what makes a stale
 // stylesheet detectable at runtime instead of silently breaking layout.
-assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.0"/);
+assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.1"/);
 assert.equal(
   styleSource.match(/--pj-stylesheet-version:"([^"]+)"/)[1],
   manifest.version,
@@ -116,9 +116,11 @@ assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
 assert.match(source, /#extensions_settings,#extensions_settings2/);
 assert.match(source, /selectExtensionDrawerContainer/);
-assert.match(source, /PLUGIN_VERSION = '0\.21\.0'/);
-assert.match(manifest.js, /\?v=0\.21\.0$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
-assert.match(manifest.css, /\?v=0\.21\.0$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(source, /PLUGIN_VERSION = '0\.21\.1'/);
+assert.match(manifest.js, /\?v=0\.21\.1$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(manifest.css, /\?v=0\.21\.1$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(source, /document\.createElement\('dialog'\)/, '手札必须进入浏览器 top layer，不能只依赖 z-index');
+assert.match(source, /root\.showModal\(\)/, '打开手札必须调用原生 dialog.showModal');
 assert.match(source, /privateJournalInstance/);
 assert.match(source, /initialize:failed/);
 assert.match(source, /safeToastr\('error', `私语手札 v\$\{PLUGIN_VERSION\} 初始化失败/);
@@ -140,9 +142,9 @@ assert.match(styleSource, /@keyframes pj-reader-sheet-forward[\s\S]*?rotateY\(-1
 assert.match(styleSource, /\.pj-page-turner::after/, '翻动纸张需要背页层次，而不是单层渐变条');
 assert.match(styleSource, /animation:pj-reader-sheet-forward \.62s cubic-bezier\(\.45,0,\.55,1\)/, '纸张应以对称缓动经过 90° 中点');
 assert.match(source, /\}, 310\);\s*\n\}/, '内容必须在纸张经过中点时交换');
-assert.match(styleSource, /\.pj-api-popover[^}]*width:min\(286px,calc\(100vw - 20px\)\)/, '副 API 面板应收窄到紧凑尺寸');
+assert.match(styleSource, /\.pj-api-popover[^}]*width:min\(260px,calc\(100vw - 20px\)\)/, '副 API 面板应收窄到紧凑尺寸');
 assert.match(styleSource, /\.pj-api-popover[^}]*box-sizing:border-box/, '副 API 面板宽度必须包含 padding 与边框');
-assert.match(styleSource, /\.pj-api-popover[^}]*max-height:min\(360px,calc\(100dvh - 132px\)\)/, '副 API 面板必须限制高度并允许滚动');
+assert.match(styleSource, /\.pj-api-popover[^}]*max-height:min\(340px,calc\(100dvh - 132px\)\)/, '副 API 面板必须限制高度并允许滚动');
 assert.match(styleSource, /\.pj-model-picker[^}]*max-width:100%/, '模型选择行应保持紧凑');
 assert.match(source, /data-setting="secondaryApiKey"/, '副 API 必须先由用户选择 API 名称');
 assert.match(source, /<select id="pj-secondary-model"/, '拉取后的模型必须用紧凑下拉框选择');
@@ -152,21 +154,24 @@ const openJournalStart = source.indexOf('async function openJournal(');
 assert.ok(openJournalStart > 0, 'openJournal must exist');
 const openJournalEnd = source.indexOf('\nfunction startBookLoad', openJournalStart);
 const openJournalSource = source.slice(openJournalStart, openJournalEnd);
+const surfaceStart = source.indexOf('function showJournalSurface(');
+const surfaceEnd = source.indexOf('\nfunction closeJournalSurface', surfaceStart);
+const surfaceSource = source.slice(surfaceStart, surfaceEnd);
 assert.ok(
-  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("startBookLoad('open')"),
+  openJournalSource.indexOf('showJournalSurface(source)') < openJournalSource.indexOf("startBookLoad('open')"),
   '移动端点击后必须先显示手札，再等待 IndexedDB 加载',
 );
 // The overlay must not depend on style.css being fresh. Expensive geometry
 // probes run on the next frame so a mobile tap never waits for forced layout.
 assert.ok(
-  openJournalSource.indexOf("root.style.display = 'block'") < openJournalSource.indexOf("startBookLoad('open')"),
+  surfaceSource.includes("root.classList.add('open')") && surfaceSource.includes("display: 'block'"),
   '打开时必须直接设置 inline display，不能只依赖 .open 样式规则',
 );
 assert.ok(
-  openJournalSource.indexOf("root.classList.add('open')") < openJournalSource.indexOf("raf(() => {"),
+  openJournalSource.indexOf('showJournalSurface(source)') < openJournalSource.indexOf('raf(() => {'),
   '可见外框必须先出现，再调度下一帧诊断',
 );
-assert.match(openJournalSource, /raf\(\(\) => \{\s*probeOverlay\('after-open'\)/, '强制布局诊断必须延后到动画帧');
+assert.match(openJournalSource, /raf\(\(\) => \{\s*const report = probeOverlay\('after-open'\)/, '强制布局诊断必须延后到动画帧');
 assert.match(openJournalSource, /trace\('openJournal:enter'/);
 assert.doesNotMatch(openJournalSource, /await\s+(?:loadBook|storageRead|storageWrite)/);
 assert.doesNotMatch(openJournalSource, /generateQuietPrompt|callJournalApi|callCurrentMainApi|fetch\s*\(/, '打开手札不得触发任何模型 API');

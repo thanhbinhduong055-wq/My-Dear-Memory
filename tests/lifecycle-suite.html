@@ -76,12 +76,34 @@
         assert(state.open, '无 PointerEvent 或合成 click 时，touchend 没有打开手札');
         assert(state.modelCalls === 0, '触摸打开手札不应调用模型');
       });
+      await test('云酒馆顶层界面不能遮住手札', 'storage=normal&drawers=settings2', async (win, api) => {
+        Object.assign(win.frameElement.style, { width: '390px', height: '844px', opacity: '0.001' });
+        const blocker = win.document.createElement('div');
+        blocker.id = 'cloud-mobile-top-layer';
+        blocker.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#111;';
+        win.document.body.append(blocker);
+        win.document.querySelector('#private-journal-launcher').click();
+        await api.settle(40);
+        const root = win.document.querySelector('#private-journal');
+        const top = win.document.elementFromPoint(win.innerWidth / 2, win.innerHeight / 2);
+        assert(root?.tagName === 'DIALOG' && root.open, '手札没有进入浏览器顶层对话框');
+        assert(top === root || root.contains(top), '云酒馆的顶层界面仍遮住了手札');
+        assert(win.document.querySelector('#private-journal-launcher').hidden, '确认手札可见后浮窗才应隐藏');
+        blocker.remove();
+        root.querySelector('[data-action="close"]').click();
+        await api.settle(20);
+        assert(!root.open && !root.classList.contains('open'), '关闭后原生对话框状态没有复位');
+        assert(!win.document.querySelector('#private-journal-launcher').hidden, '关闭手札后没有恢复浮窗');
+        win.document.querySelector('#private-journal-launcher').click();
+        await api.settle(20);
+        assert(root.open && root.classList.contains('open'), '关闭后无法再次打开手札');
+      });
       await test('副 API 名称筛选并完整拉取模型', 'storage=normal&drawers=settings2', async (win, api) => {
         const state = await api.exerciseApiPicker();
         assert(state.apiOptions === 3 && state.apiValue === 'openrouter', 'API 名称选择没有正确保存');
         assert(state.profileOptions === 2 && /^or-/.test(state.profileValue), '连接配置没有按 API 名称过滤');
         assert(state.modelTag === 'SELECT' && state.modelOptions === 1203, `模型下拉只显示了 ${state.modelOptions} 项`);
-        assert(state.panelWidth <= 286.5 && state.panelHeight <= 360.5, `副 API 面板仍过大：${state.panelWidth}×${state.panelHeight}`);
+        assert(state.panelWidth <= 260.5 && state.panelHeight <= 340.5, `副 API 面板仍过大：${state.panelWidth}×${state.panelHeight}`);
       });
       await test('只有 #extensions_settings', 'storage=normal&drawers=settings', async (win, api) => {
         assert(api.state().drawerParent === 'extensions_settings', '入口未挂载到旧抽屉');
