@@ -37,9 +37,9 @@ with sync_playwright() as p:
   print('\n=== 4. 实际运行版本 ===')
   c=ctx(b); pg=c.new_page(); pg.goto(BASE,wait_until='networkidle'); pg.wait_for_timeout(600)
   rt=pg.evaluate("()=>({v:window.__stPrivateJournalRuntime.version, html:document.documentElement.dataset.privateJournalVersion, root:document.querySelector('#private-journal').dataset.pluginVersion})")
-  check('runtime.version === 0.21.0', rt['v']=='0.21.0', rt)
-  check('documentElement dataset marker', rt['html']=='0.21.0', rt)
-  check('root dataset marker', rt['root']=='0.21.0', rt)
+  check('runtime.version === 0.21.1', rt['v']=='0.21.1', rt)
+  check('documentElement dataset marker', rt['html']=='0.21.1', rt)
+  check('root dataset marker', rt['root']=='0.21.1', rt)
 
   print('\n=== 9. 资源 URL（module 下 currentScript 为 null）===')
   a=pg.evaluate("()=>window.__stPrivateJournalRuntime.assets()")
@@ -52,7 +52,7 @@ with sync_playwright() as p:
 
   print('\n=== 8. 样式表健康 ===')
   ss=pg.evaluate("()=>window.__stPrivateJournalRuntime.stylesheet()")
-  check('stylesheet ok + marker matches', ss['status']=='ok' and ss['marker']=='0.21.0', ss)
+  check('stylesheet ok + marker matches', ss['status']=='ok' and ss['marker']=='0.21.1', ss)
   c.close()
 
   print('\n=== 7. 真实移动端几何矩阵 ===')
@@ -100,10 +100,10 @@ with sync_playwright() as p:
   check('elementsFromPoint top-10 captured', len(probes[0]['stack'])>0 and len(probes[0]['stack'])<=10)
   c.close()
 
-  print('\n=== 8b. 过期 CSS（JS 0.21.0 + CSS 0.20.0 缓存）===')
+  print('\n=== 8b. 过期 CSS（JS 0.21.1 + CSS 0.21.0 缓存）===')
   c=ctx(b); pg=c.new_page()
   def stale(route):
-    body=open(__import__('pathlib').Path(__file__).resolve().parents[2]/'style.css',encoding='utf-8').read().replace('--pj-stylesheet-version:"0.21.0"','--pj-stylesheet-version:"0.20.0"')
+    body=open(__import__('pathlib').Path(__file__).resolve().parents[2]/'style.css',encoding='utf-8').read().replace('--pj-stylesheet-version:"0.21.1"','--pj-stylesheet-version:"0.21.0"')
     route.fulfill(status=200,content_type='text/css',body=body)
   pg.route('**/cand/style.css', stale)
   errs=[]; toasts=[]
@@ -112,7 +112,7 @@ with sync_playwright() as p:
   ss=pg.evaluate("()=>window.__stPrivateJournalRuntime.stylesheet()")
   rep=pg.evaluate("()=>window.__stPrivateJournalRuntime.report()")
   toast=pg.evaluate("()=>window.__HARNESS_LOG.filter(r=>r[0].startsWith('toastr')).map(r=>r[1])")
-  check('stale CSS detected', ss['status']=='stale' and ss['marker']=='0.20.0', ss)
+  check('stale CSS detected', ss['status']=='stale' and ss['marker']=='0.21.0', ss)
   check('verdict D:stale-css-cached', rep['verdict']=='D:stale-css-cached', rep['verdict'])
   check('loud console error emitted', any('stylesheet' in e for e in errs), errs[:2])
   check('user-visible toastr emitted', any('样式表' in t for t in toast), toast)
