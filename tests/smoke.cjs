@@ -62,11 +62,11 @@ assert.equal(vm.runInContext('DEFAULTS.secondaryApiKey', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
 assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
-assert.equal(manifest.version, '0.21.1');
+assert.equal(manifest.version, '0.21.2');
 assert.equal(vm.runInContext('PLUGIN_VERSION', sandbox), manifest.version);
 // JS and CSS are cached independently; the marker is what makes a stale
 // stylesheet detectable at runtime instead of silently breaking layout.
-assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.1"/);
+assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.2"/);
 assert.equal(
   styleSource.match(/--pj-stylesheet-version:"([^"]+)"/)[1],
   manifest.version,
@@ -116,9 +116,9 @@ assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
 assert.match(source, /#extensions_settings,#extensions_settings2/);
 assert.match(source, /selectExtensionDrawerContainer/);
-assert.match(source, /PLUGIN_VERSION = '0\.21\.1'/);
-assert.match(manifest.js, /\?v=0\.21\.1$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
-assert.match(manifest.css, /\?v=0\.21\.1$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(source, /PLUGIN_VERSION = '0\.21\.2'/);
+assert.match(manifest.js, /\?v=0\.21\.2$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(manifest.css, /\?v=0\.21\.2$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
 assert.match(source, /document\.createElement\('dialog'\)/, '手札必须进入浏览器 top layer，不能只依赖 z-index');
 assert.match(source, /root\.showModal\(\)/, '打开手札必须调用原生 dialog.showModal');
 assert.match(source, /privateJournalInstance/);
@@ -461,6 +461,16 @@ assert.equal(monthMarker.spanDays, 30);
 assert.equal(monthMarker.isExtended, true);
 const weeksMarker = vm.runInContext(`detectStoryDayMarker('数周后，他们终于回到了旧宅。')`, sandbox);
 assert.equal(weeksMarker.spanDays >= 21, true);
+const midReplyDayMarker = vm.runInContext(`detectStoryDayMarker('他们在廊下坐了很久，谁也没有先开口。\\n\\n一个月后，院子里的花已经开了。')`, sandbox);
+assert.equal(midReplyDayMarker.type, 'relative', '故事时间标记不应只在回复第一句话中生效');
+assert.equal(midReplyDayMarker.spanDays, 30, '正文中段的长时间跨度必须被识别');
+const lateReplyDayMarker = vm.runInContext(`detectStoryDayMarker('很长的铺垫。'.repeat(450) + '第二天清晨，他终于推开了门。')`, sandbox);
+assert.equal(lateReplyDayMarker.type, 'relative', '长回复后段的跨日标记也必须被识别');
+assert.equal(
+  vm.runInContext(`detectStoryDayMarker('他说：“一个月后再见。”她没有回答。')`, sandbox),
+  null,
+  '对白中的未来约定不能被误判为故事时间已经推进',
+);
 
 const timelineBook = vm.runInContext(`({ timeline: {} })`, sandbox);
 sandbox.timelineBook = timelineBook;
@@ -476,6 +486,12 @@ assert.equal(nextDayDecision.reason, 'relative-boundary');
 const duplicateDecision = vm.runInContext(`observeStoryDay(timelineBook, { signature: 's3', content: '第二天早上，他先醒了。' })`, sandbox);
 assert.equal(duplicateDecision.shouldUpdate, false);
 assert.equal(duplicateDecision.reason, 'duplicate');
+
+const mixedTimelineBook = vm.runInContext(`({ timeline: {} })`, sandbox);
+sandbox.mixedTimelineBook = mixedTimelineBook;
+vm.runInContext(`observeStoryDay(mixedTimelineBook, { signature: 'u1', content: '夜色很安静。' })`, sandbox);
+const firstDatedBoundary = vm.runInContext(`observeStoryDay(mixedTimelineBook, { signature: 'u2', content: '2025年1月19日清晨，她推开了窗。' })`, sandbox);
+assert.equal(firstDatedBoundary.shouldUpdate, true, '建立无日期基线后出现明确新日期，应整理已经结束的故事日');
 
 const datedTimelineBook = vm.runInContext(`({ timeline: {} })`, sandbox);
 sandbox.datedTimelineBook = datedTimelineBook;
@@ -594,6 +610,7 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   assert.equal(result, '正文 API 的返回内容');
   assert.equal(receivedOptions.quietPrompt, '写一页日记');
   assert.equal(receivedOptions.skipWIAN, false);
+  assert.equal(receivedOptions.responseLength, 5200, '正文 API 必须为完整批量手札预留输出长度');
 
   const realSetTimeout = sandbox.setTimeout;
   const realClearTimeout = sandbox.clearTimeout;
@@ -623,6 +640,21 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   assert.equal(vm.runInContext('mainGenerationCycleSeen', sandbox), false);
   sandbox.setTimeout = realSetTimeout;
   sandbox.clearTimeout = realClearTimeout;
+
+  vm.runInContext(`
+    mainGenerationActive = true;
+    mainGenerationCycleSeen = true;
+    releaseMainGenerationLock('generation-stopped', { schedule: false });
+  `, sandbox);
+  assert.equal(vm.runInContext('mainGenerationActive', sandbox), false, '正文停止后必须立即释放手札生成锁');
+  assert.equal(vm.runInContext('mainGenerationCycleSeen', sandbox), false, '没有新正文时不得留下待处理周期');
+  assert.match(source, /eventTypes\?\.GENERATION_STOPPED/, '必须监听 SillyTavern 的正文停止事件');
+  assert.equal(vm.runInContext(`
+    mainGenerationActive = true;
+    mainGenerationCycleSeen = true;
+    mainGenerationStartedAt = Date.now() - 6000;
+    reconcileMainGenerationLock('test-manual');
+  `, sandbox), false, '宿主已经空闲时，手动生成必须能清除遗留锁并继续');
 
   let secondaryRequest;
   contextValue.characters = [{
@@ -675,6 +707,18 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   assert.match(secondaryRequest.messages[0].content, /姜藏写字克制/);
   assert.match(secondaryRequest.messages[0].content, /世界书：旧宅临江/);
   assert.equal(secondaryRequest.messages.at(-1).content, '整理今天的相处日记');
+  contextValue.ConnectionManagerRequestService.sendRequest = async () => {
+    throw new Error('API request failed', { cause: new Error('Response not OK') });
+  };
+  await assert.rejects(
+    vm.runInContext(`callSecondaryApi('整理今天的相处日记')`, sandbox),
+    /鉴权失败.*重新保存此连接配置.*Response not OK/,
+    'SillyTavern 1.18.0 的连接配置鉴权错误必须给出可操作提示',
+  );
+  contextValue.ConnectionManagerRequestService.sendRequest = async (profileId, messages, maxTokens, options, overridePayload) => {
+    secondaryRequest = { profileId, messages, maxTokens, options, overridePayload };
+    return { content: '副 API 的返回内容' };
+  };
   contextValue.getRequestHeaders = () => ({ 'Content-Type': 'application/json', 'X-Test': 'yes' });
   sandbox.fetch = async (endpoint, options) => {
     assert.equal(endpoint, '/api/backends/chat-completions/status');
@@ -699,8 +743,10 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   contextValue.extensionSettings.st_private_journal.generationApiMode = 'main';
 
   let batchApiCalls = 0;
-  contextValue.generateQuietPrompt = async () => {
+  let batchPromptOptions;
+  contextValue.generateQuietPrompt = async options => {
     batchApiCalls += 1;
+    batchPromptOptions = options;
     return JSON.stringify({
       relationship: { status: 'uncertain', reason: '证据不足', evidence: [] },
       updates: [
@@ -714,6 +760,7 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   vm.runInContext('currentBook = blankBook()', sandbox);
   await vm.runInContext(`generateBatch({ captureSignature: 'one-main-message' })`, sandbox);
   assert.equal(batchApiCalls, 1);
+  assert.equal(batchPromptOptions.responseLength, 5200, '一次批量生成必须申请足够的输出长度');
   assert.equal(vm.runInContext('currentBook.pages.length', sandbox), 3);
   assert.equal(vm.runInContext(`currentBook.pages.some(page => 'song' in page || 'poem' in page || 'hasRoundAccompaniment' in page)`, sandbox), false);
 

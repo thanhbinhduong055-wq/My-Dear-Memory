@@ -13,6 +13,7 @@
     off(name, fn) { const l = handlers.get(name) || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); },
     emit(name, ...args) { for (const fn of (handlers.get(name) || []).slice()) fn(...args); },
   };
+  window.__ST_EVENT_SOURCE = eventSource;
   const extensionSettings = {};
   window.SillyTavern = {
     version: '1.18.0',
@@ -21,7 +22,8 @@
       eventSource,
       eventTypes: {
         CHAT_CHANGED: 'chat_changed', GENERATION_STARTED: 'generation_started',
-        GENERATION_ENDED: 'generation_ended', CHARACTER_MESSAGE_RENDERED: 'character_message_rendered',
+        GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped',
+        CHARACTER_MESSAGE_RENDERED: 'character_message_rendered',
       },
       extensionSettings,
       saveSettingsDebounced: () => {},

@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.21.1';
+const PLUGIN_VERSION = '0.21.2';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -88,6 +88,8 @@ function trace(stage, extra = {}) {
 const STORAGE_READ_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageTimeoutMs) || 3000;
 const STORAGE_WRITE_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.storageWriteTimeoutMs) || 5000;
 const SECONDARY_MODEL_TIMEOUT_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.modelTimeoutMs) || 15000;
+const MAIN_GENERATION_WATCHDOG_MS = Number(window.__PRIVATE_JOURNAL_TEST_CONFIG__?.generationWatchdogMs) || 20000;
+const MAIN_GENERATION_START_GRACE_MS = 5000;
 const BOOK_VERSION = 10;
 const MAX_STICKER_BYTES = 700 * 1024;
 
@@ -125,6 +127,8 @@ let mainGenerationStartSignature = null;
 let queuedType = null;
 let autoGenerationTimer = null;
 let autoGenerationRetries = 0;
+let mainGenerationWatchdog = null;
+let mainGenerationStartedAt = 0;
 let pageTurnTimer = null;
 let pageTurnSwapTimer = null;
 let wandMenuObserver = null;
@@ -425,6 +429,7 @@ function journalSelfReport() {
     overlay,
     sillyTavernVersion: sillyTavernVersion(),
     coarsePointer: coarsePointerEnvironment(),
+    generationState: diagnosticSnapshot().generationState,
   };
   trace('self-report', { verdict, stylesheet: stylesheet.status, instances: instances.length });
   console.info(`[PJ ${PLUGIN_VERSION}] self-report verdict: ${verdict}`, report);
@@ -581,6 +586,14 @@ function diagnosticSnapshot(extra = {}) {
     extensionDrawer: selectedDrawerDescription(),
     storageMode: storageRuntime.mode,
     storagePhase: storageRuntime.phase,
+    generationState: {
+      mainActive: mainGenerationActive,
+      journalActive: journalGenerationActive,
+      relationshipActive: relationshipCheckActive,
+      cycleSeen: mainGenerationCycleSeen,
+      queuedType,
+      hostActive: hostReportsMainGenerationActive(),
+    },
     ...extra,
   };
 }
@@ -1390,36 +1403,48 @@ function storyPeriod(fromKey, fromLabel, marker) {
 function detectStoryDayMarker(content = '') {
   const head = String(content)
     .replace(/<[^>]+>/g, ' ')
-    .replace(/^[\s\u3000*_#>`「」『』“”'"【】\[\]（）()—-]+/, '')
-    .replace(/\s+/g, ' ')
-    .slice(0, 360);
+    .replace(/\r\n?/g, '\n')
+    .replace(/^[\s\u3000*_#>`【\[（(—-]+/, '')
+    .replace(/[\t\u3000 ]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, 6000);
   if (!head) return null;
 
-  const fullDate = /(?:^|[【\[(（\s])((?:19|20)\d{2})[年\/.\-](\d{1,2})[月\/.\-](\d{1,2})日?/.exec(head);
-  if (fullDate && fullDate.index <= 80) {
-    const year = fullDate[1];
-    const month = fullDate[2].padStart(2, '0');
-    const day = fullDate[3].padStart(2, '0');
+  const candidates = [];
+  const collect = (pattern, createMarker) => {
+    for (const match of head.matchAll(pattern)) {
+      const marker = createMarker(match);
+      if (marker) candidates.push({ index: match.index || 0, marker });
+    }
+  };
+  // A real timeline transition normally begins a paragraph or sentence. This
+  // deliberately excludes quoted promises such as “一个月后再见”.
+  const boundary = '(?:^|[\\n。！？!?；;]\\s*)';
+
+  collect(new RegExp(`${boundary}(?:[【\\[(（]\\s*)?((?:19|20)\\d{2})[年\\/.\\-](\\d{1,2})[月\\/.\\-](\\d{1,2})日?`, 'gm'), match => {
+    const year = match[1];
+    const month = match[2].padStart(2, '0');
+    const day = match[3].padStart(2, '0');
     return { type: 'absolute', key: `date:${year}-${month}-${day}`, label: `${year}年${Number(month)}月${Number(day)}日` };
-  }
-
-  const monthDay = /(?:^|[【\[(（\s])(\d{1,2})月(\d{1,2})日/.exec(head);
-  if (monthDay && monthDay.index <= 80) {
-    const month = monthDay[1].padStart(2, '0');
-    const day = monthDay[2].padStart(2, '0');
+  });
+  collect(new RegExp(`${boundary}(?:[【\\[(（]\\s*)?(\\d{1,2})月(\\d{1,2})日`, 'gm'), match => {
+    const month = match[1].padStart(2, '0');
+    const day = match[2].padStart(2, '0');
     return { type: 'absolute', key: `date:unknown-${month}-${day}`, label: `${Number(month)}月${Number(day)}日` };
-  }
+  });
+  collect(new RegExp(`${boundary}(?:[【\\[(（]\\s*)?(?:(?:转眼(?:间)?|不知不觉|一晃|时间(?:已经)?(?:过去|来到))\\s*)?(?:又\\s*)?((?:\\d+|[一二两三四五六七八九十两半数几]+)\\s*(天|日|周|星期|个月|月|年))(?:之后|以后|后|过去|过去了)(?:[】\\])）]\\s*)?(?:[，。,:：\\s]|$)`, 'gm'), match => {
+    const quantity = match[1].replace(new RegExp(`${match[2]}$`), '').trim();
+    const spanDays = spanDaysFromParts(quantity, match[2]);
+    return { type: 'relative', key: null, label: `${match[1]}后`, spanDays, isExtended: spanDays > 1 };
+  });
+  collect(new RegExp(`${boundary}(?:[【\\[(（]\\s*)?(?:到了?|来到|待到|直至|直到)?\\s*(次日|翌日|第二天|隔天|又过了一天|新的一天|第二日|次晨|翌晨)(?:[】\\])）]\\s*)?(?:清晨|早晨|早上|上午|中午|午后|傍晚|晚上|夜里)?(?:[】\\])）]\\s*)?(?:[，。,:：\\s]|$)`, 'gm'), match => (
+    { type: 'relative', key: null, label: match[1], spanDays: 1, isExtended: false }
+  ));
 
-  const elapsed = /^(?:[【\[(（][^】\])）]{0,24}[】\])）]\s*)?(?:(?:转眼(?:间)?|不知不觉|一晃|时间(?:已经)?(?:过去|来到))\s*)?(?:又\s*)?((?:\d+|[一二两三四五六七八九十两半数几]+)\s*(天|日|周|星期|个月|月|年))(?:之后|以后|后|过去|过去了)(?:[，。,:：\s]|$)/.exec(head);
-  if (elapsed) {
-    const quantity = elapsed[1].replace(new RegExp(`${elapsed[2]}$`), '').trim();
-    const spanDays = spanDaysFromParts(quantity, elapsed[2]);
-    return { type: 'relative', key: null, label: elapsed[0].trim().replace(/[，。,:：]$/, ''), spanDays, isExtended: spanDays > 1 };
-  }
-
-  const relative = /^(?:[【\[(（][^】\])）]{0,24}[】\])）]\s*)?(次日|翌日|第二天|隔天|又过了一天|新的一天|第二日|次晨|翌晨)(?:[】\])）]\s*)?(?:清晨|早晨|早上|上午|中午|午后|傍晚|晚上|夜里)?(?:[】\])）]\s*)?(?:[，。,:：\s]|$)/.exec(head);
-  if (relative) return { type: 'relative', key: null, label: relative[1], spanDays: 1, isExtended: false };
-  return null;
+  // A reply may open on the old date and advance later in the same message.
+  // The last narrative marker represents the final story position.
+  return candidates.sort((left, right) => left.index - right.index).at(-1)?.marker || null;
 }
 
 function observeStoryDay(book, assistantInfo) {
@@ -1445,9 +1470,11 @@ function observeStoryDay(book, assistantInfo) {
   if (marker.type === 'absolute') {
     if (timeline.currentDayKey === marker.key) return { shouldUpdate: false, reason: 'same-day', marker };
     if (timeline.currentDayKey === 'story-day:0') {
+      const completedDayLabel = timeline.currentDayLabel || '上一故事日';
+      const period = storyPeriod(timeline.currentDayKey, completedDayLabel, marker);
       timeline.currentDayKey = marker.key;
       timeline.currentDayLabel = marker.label;
-      return { shouldUpdate: false, reason: 'dated-baseline', marker };
+      return { shouldUpdate: true, reason: 'absolute-boundary', marker, completedDayLabel, period };
     }
     const completedDayLabel = timeline.currentDayLabel || '上一故事日';
     const period = storyPeriod(timeline.currentDayKey, completedDayLabel, marker);
@@ -1483,7 +1510,7 @@ function setGeneratingUi(generating) {
   button.textContent = generating ? '正在拾取回忆…' : (isQuote ? '保存小纸条' : `生成${PAGE_TYPES[activeType]?.label || '这一页'}`);
 }
 
-async function callCurrentMainApi(prompt) {
+async function callCurrentMainApi(prompt, maxTokens = 5200) {
   const context = ctx();
   if (typeof context.generateQuietPrompt !== 'function') {
     throw new Error('当前 SillyTavern 没有提供 generateQuietPrompt，请升级到最新版');
@@ -1496,6 +1523,7 @@ async function callCurrentMainApi(prompt) {
     quietToLoud: false,
     skipWIAN: false,
     removeReasoning: true,
+    responseLength: maxTokens,
   });
   if (typeof result !== 'string' || !result.trim()) throw new Error('正文 API 返回了空内容');
   return result;
@@ -1837,7 +1865,29 @@ async function buildSecondaryApiMessages(prompt) {
   ]);
 }
 
-async function callSecondaryApi(prompt) {
+function deepestErrorMessage(error) {
+  let current = error;
+  let message = '';
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const candidate = String(current?.message || current || '').trim();
+    if (candidate) message = candidate;
+    current = current?.cause;
+  }
+  return message || '未知错误';
+}
+
+function secondaryApiFailure(error, profile) {
+  const detail = deepestErrorMessage(error);
+  const label = profileDisplayName(profile);
+  if (/response not ok|\b401\b|\b403\b|unauthori[sz]ed|forbidden|api request failed/i.test(detail)) {
+    return new Error(`副 API“${label}”鉴权失败。请在 SillyTavern 连接管理器中切换到该 API、重新保存此连接配置后再试（${detail}）`, { cause: error });
+  }
+  return new Error(`副 API“${label}”请求失败：${detail}`, { cause: error });
+}
+
+async function callSecondaryApi(prompt, maxTokens = 5200) {
   const context = ctx();
   const settings = getSettings();
   const service = context.ConnectionManagerRequestService;
@@ -1852,21 +1902,26 @@ async function callSecondaryApi(prompt) {
     throw new Error('所选副 API 连接配置不存在或暂不支持文本生成');
   }
   const messages = await buildSecondaryApiMessages(prompt);
-  const result = await service.sendRequest(settings.secondaryProfileId, messages, 5200, {
-    stream: false,
-    extractData: true,
-    includePreset: true,
-    includeInstruct: true,
-  }, settings.secondaryModelId ? { model: settings.secondaryModelId } : {});
+  let result;
+  try {
+    result = await service.sendRequest(settings.secondaryProfileId, messages, maxTokens, {
+      stream: false,
+      extractData: true,
+      includePreset: true,
+      includeInstruct: true,
+    }, settings.secondaryModelId ? { model: settings.secondaryModelId } : {});
+  } catch (error) {
+    throw secondaryApiFailure(error, profile);
+  }
   const content = typeof result === 'string' ? result : result?.content;
   if (typeof content !== 'string' || !content.trim()) throw new Error('副 API 返回了空内容');
   return content;
 }
 
-async function callJournalApi(prompt) {
+async function callJournalApi(prompt, maxTokens = 5200) {
   return getSettings().generationApiMode === 'secondary'
-    ? callSecondaryApi(prompt)
-    : callCurrentMainApi(prompt);
+    ? callSecondaryApi(prompt, maxTokens)
+    : callCurrentMainApi(prompt, maxTokens);
 }
 
 async function checkRelationship() {
@@ -1878,7 +1933,7 @@ async function checkRelationship() {
   setStatus('正在依据当前故事判定关系…');
   renderControls();
   try {
-    const result = await callJournalApi(buildRelationshipPrompt());
+    const result = await callJournalApi(buildRelationshipPrompt(), 800);
     currentBook.relationship = parseRelationship(result);
     await saveBook();
     setStatus(isRomanceUnlocked() ? '已确认伴侣关系，恋爱日记已解锁' : '尚未确认伴侣关系');
@@ -1916,6 +1971,67 @@ async function resetRelationship() {
   render();
 }
 
+function clearMainGenerationWatchdog() {
+  clearTimeout(mainGenerationWatchdog);
+  mainGenerationWatchdog = null;
+}
+
+function hostReportsMainGenerationActive() {
+  if (document.body?.dataset?.generating === 'true') return true;
+  const stopButton = document.querySelector?.('#mes_stop');
+  if (!stopButton || stopButton.hidden || !stopButton.isConnected) return false;
+  try {
+    const style = window.getComputedStyle?.(stopButton);
+    return style ? style.display !== 'none' && style.visibility !== 'hidden' : false;
+  } catch (error) {
+    return false;
+  }
+}
+
+function releaseMainGenerationLock(source = 'unknown', { schedule = true } = {}) {
+  clearMainGenerationWatchdog();
+  const wasActive = mainGenerationActive;
+  mainGenerationActive = false;
+  mainGenerationStartedAt = 0;
+  trace('generation:released', { source, wasActive, cycleSeen: mainGenerationCycleSeen, queuedType });
+  if (!schedule) {
+    mainGenerationCycleSeen = false;
+    autoGenerationRetries = 0;
+    return;
+  }
+  const signature = latestAssistantSignature();
+  const hasNewAssistantContent = Boolean(signature && signature !== mainGenerationStartSignature);
+  if (mainGenerationCycleSeen && (hasNewAssistantContent || queuedType)) {
+    scheduleAutoGeneration();
+    return;
+  }
+  mainGenerationCycleSeen = false;
+  autoGenerationRetries = 0;
+  if (source === 'generation-stopped' && !queuedType) setStatus('正文生成已停止，手札等待下一轮正文');
+}
+
+function armMainGenerationWatchdog() {
+  clearMainGenerationWatchdog();
+  mainGenerationWatchdog = setTimeout(() => {
+    mainGenerationWatchdog = null;
+    if (!mainGenerationActive) return;
+    if (hostReportsMainGenerationActive()) {
+      armMainGenerationWatchdog();
+      return;
+    }
+    releaseMainGenerationLock('watchdog');
+  }, MAIN_GENERATION_WATCHDOG_MS);
+}
+
+function reconcileMainGenerationLock(source = 'manual') {
+  if (!mainGenerationActive) return false;
+  const age = Date.now() - mainGenerationStartedAt;
+  if (age < MAIN_GENERATION_START_GRACE_MS || hostReportsMainGenerationActive()) return true;
+  releaseMainGenerationLock(`${source}:stale`, { schedule: false });
+  setStatus('已恢复上一轮遗留的生成状态');
+  return false;
+}
+
 async function generatePage({ type = activeType, source = 'manual', captureSignature = null } = {}) {
   if (!ctx().chatId && !ctx().getCurrentChatId?.()) {
     toastr.warning('请先打开一个角色聊天。', '私语手札');
@@ -1934,6 +2050,7 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     if (source === 'manual') toastr.info('已有一页正在生成。', '私语手札');
     return;
   }
+  if (mainGenerationActive) reconcileMainGenerationLock('generate-page');
   if (mainGenerationActive) {
     queuedType = type;
     setStatus(`已排队：正文结束后生成${PAGE_TYPES[type]?.label || '日记'}`);
@@ -1954,7 +2071,7 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     const generationOptions = type === 'impression'
       ? { impressionFocus: activeImpressionFocus, customRequest: customImpressionRequest }
       : {};
-    const result = await callJournalApi(buildPrompt(type, generationOptions));
+    const result = await callJournalApi(buildPrompt(type, generationOptions), 1800);
     const page = parseJson(result, type);
     page.id = createId();
     page.type = type;
@@ -1988,6 +2105,7 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
 
 async function generateBatch({ captureSignature = null, period = null } = {}) {
   if (!ctx().chatId && !ctx().getCurrentChatId?.()) return false;
+  if (mainGenerationActive) reconcileMainGenerationLock('generate-batch');
   if (journalGenerationActive || mainGenerationActive) return false;
 
   const targetBook = currentBook;
@@ -2004,7 +2122,7 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
   const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
   setStatus(`正文完成，正在用一次${apiLabel}同步全部手札…`);
   try {
-    const result = await callJournalApi(buildBatchPrompt(batchOptions));
+    const result = await callJournalApi(buildBatchPrompt(batchOptions), 5200);
     const batch = parseBatch(result);
     const manualRelationship = targetBook.relationship?.source === 'user' && targetBook.relationship?.status === 'partners';
     if (!manualRelationship && batch.relationship) targetBook.relationship = batch.relationship;
@@ -3435,6 +3553,7 @@ function cleanupPluginInstance(reason = 'unspecified') {
   initializationRevision += 1;
   bookLoadRevision += 1;
   clearTimeout(autoGenerationTimer);
+  clearMainGenerationWatchdog();
   clearTimeout(pageTurnTimer);
   clearTimeout(pageTurnSwapTimer);
   clearTimeout(quoteSelectionRefreshTimer);
@@ -3449,6 +3568,14 @@ function cleanupPluginInstance(reason = 'unspecified') {
   removeJournalDomArtifacts();
   pendingBookLoad = null;
   pendingBookLoadKey = null;
+  mainGenerationActive = false;
+  journalGenerationActive = false;
+  relationshipCheckActive = false;
+  mainGenerationCycleSeen = false;
+  mainGenerationStartSignature = null;
+  mainGenerationStartedAt = 0;
+  queuedType = null;
+  autoGenerationRetries = 0;
   root = null;
 }
 
@@ -3528,20 +3655,26 @@ async function initialize({ reason = 'bootstrap' } = {}) {
     bindContextEvent(eventSource, context.eventTypes?.GENERATION_STARTED, () => {
       if (!journalGenerationActive && !relationshipCheckActive) {
         mainGenerationActive = true;
+        mainGenerationStartedAt = Date.now();
         mainGenerationCycleSeen = true;
         mainGenerationStartSignature = latestAssistantSignature();
         autoGenerationRetries = 0;
         setStatus('正文生成中…');
+        armMainGenerationWatchdog();
       }
     });
     bindContextEvent(eventSource, context.eventTypes?.GENERATION_ENDED, () => {
       if (!journalGenerationActive && !relationshipCheckActive) {
-        mainGenerationActive = false;
-        scheduleAutoGeneration();
+        releaseMainGenerationLock('generation-ended');
+      }
+    });
+    bindContextEvent(eventSource, context.eventTypes?.GENERATION_STOPPED, () => {
+      if (!journalGenerationActive && !relationshipCheckActive) {
+        releaseMainGenerationLock('generation-stopped');
       }
     });
     bindContextEvent(eventSource, context.eventTypes?.CHARACTER_MESSAGE_RENDERED, () => {
-      if (mainGenerationCycleSeen) scheduleAutoGeneration();
+      if (mainGenerationCycleSeen) releaseMainGenerationLock('character-message-rendered');
     });
     if (thisInitialization !== initializationRevision) return false;
     void startBookLoad('initialize').catch(error => {

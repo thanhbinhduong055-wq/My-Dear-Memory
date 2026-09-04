@@ -19,9 +19,9 @@
 - 内页采用宋体/思源宋体为正文、中文无衬线体为界面标签，正文不低于 16px，并以舒适版心、段落间距和清晰的标题层级呈现
 - 生成语气会同时参考 User Persona 和聊天里 User 的真实措辞习惯，包括句长、克制程度、情绪强度、幽默与称呼方式
 - 生成接口可自主切换“跟随正文 API”或“副 API”；副 API 先按 API 名称（OpenRouter、Claude、OpenAI、Gemini 等）筛选，再选择该 API 下已保存的 SillyTavern 连接配置，最后完整拉取模型列表。模型尚未拉取时也可手动填写模型 ID；整个选择面板在手机端限制为 260px 宽、340px 高
-- 可开启“按故事日自动整理”：普通同日续写只累计内容，不调用手札 API；明确日期变化或“次日、一个月后、数周后”等跨日/跨阶段标记出现时，才追加一次 API 请求，按真实时间范围批量同步印象、相处日记、情书、关系状态和已解锁的恋爱日记
+- 可开启“按故事日自动整理”：普通同日续写只累计内容，不调用手札 API；明确日期变化或“次日、一个月后、数周后”等跨日/跨阶段标记出现时，才追加一次 API 请求。检测会覆盖长回复中的后续段落并排除对白里的未来约定，再按真实时间范围批量同步印象、相处日记、情书、关系状态和已解锁的恋爱日记
 - 长时间跨度会将起止时间与估算天数交给模型；有多个明确剧情阶段时，同一栏目可在单次响应中保存最多三页，空白日期不会被强行编造
-- 正文仍在生成时，手动请求会排队到正文结束，不抢占主生成状态
+- 正文仍在生成时，手动请求会排队到正文结束，不抢占主生成状态；正文被停止、异常提前退出或漏发结束事件时，会通过停止事件、消息落地事件和宿主状态看门狗自动释放遗留锁
 - 每个板块的已生成内容默认折叠，点击标题后展开正文；内页可继续编辑，并插入常用表情或上传本地表情包图片
 - 新增“心情月历”：按月显示七列日期格，选择日期后可放入或清除 Emoji；不调用 API，并可随 JSON、Word 与聊天数据保存
 - 情书使用更高的情感浓度，强调具体的眷恋、心疼、渴望与脆弱；恋爱日记至少三分之二用于描写 User 的情感和关系变化
@@ -42,11 +42,11 @@
 3. 粘贴 Git 仓库 URL 并安装。
 4. 打开任意角色聊天，点击或拖动右下角酒红色 `❦` 按钮；也可以在魔法棒菜单，或“扩展”抽屉中点击“私语手札”。
 
-运行版本会显示在手札内页底部，例如 `v0.21.1`；浏览器控制台也会打印 `[Private Journal v0.21.1] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。`manifest.json` 中的 JS/CSS 路径也带有 `v=0.21.1` 缓存戳，避免手机继续读取旧版资源。
+运行版本会显示在手札内页底部，例如 `v0.21.2`；浏览器控制台也会打印 `[Private Journal v0.21.2] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。`manifest.json` 中的 JS/CSS 路径也带有 `v=0.21.2` 缓存戳，避免手机继续读取旧版资源。
 
 本地开发时，也可把整个目录放入 SillyTavern 的 `data/<user-handle>/extensions/`，或安装为所有用户后放到 `public/scripts/extensions/third-party/` 对应目录。
 
-## 手机端排障（0.21.1）
+## 手机端排障（0.21.2）
 
 先在手机浏览器 Console 里跑这一行，它会直接给出 A–E 判定：
 
@@ -70,7 +70,7 @@ window.__stPrivateJournalRuntime.report()
 其他可用入口：
 
 ```js
-window.__stPrivateJournalRuntime.version        // 必须是 0.21.1，否则是缓存/安装问题
+window.__stPrivateJournalRuntime.version        // 必须是 0.21.2，否则是缓存/安装问题
 window.__stPrivateJournalRuntime.openJournal()  // 绕开所有入口直接打开
 window.__stPrivateJournalRuntime.probeOverlay() // computed style + rect + elementsFromPoint
 window.__stPrivateJournalRuntime.stylesheet()   // CSS 版本标记比对
