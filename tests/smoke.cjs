@@ -62,11 +62,11 @@ assert.equal(vm.runInContext('DEFAULTS.secondaryApiKey', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
 assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
-assert.equal(manifest.version, '0.21.2');
+assert.equal(manifest.version, '0.21.3');
 assert.equal(vm.runInContext('PLUGIN_VERSION', sandbox), manifest.version);
 // JS and CSS are cached independently; the marker is what makes a stale
 // stylesheet detectable at runtime instead of silently breaking layout.
-assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.2"/);
+assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.3"/);
 assert.equal(
   styleSource.match(/--pj-stylesheet-version:"([^"]+)"/)[1],
   manifest.version,
@@ -116,9 +116,9 @@ assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
 assert.match(source, /#extensions_settings,#extensions_settings2/);
 assert.match(source, /selectExtensionDrawerContainer/);
-assert.match(source, /PLUGIN_VERSION = '0\.21\.2'/);
-assert.match(manifest.js, /\?v=0\.21\.2$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
-assert.match(manifest.css, /\?v=0\.21\.2$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(source, /PLUGIN_VERSION = '0\.21\.3'/);
+assert.match(manifest.js, /\?v=0\.21\.3$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(manifest.css, /\?v=0\.21\.3$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
 assert.match(source, /document\.createElement\('dialog'\)/, '手札必须进入浏览器 top layer，不能只依赖 z-index');
 assert.match(source, /root\.showModal\(\)/, '打开手札必须调用原生 dialog.showModal');
 assert.match(source, /privateJournalInstance/);
@@ -447,6 +447,52 @@ contextValue.chat[1].mes = '重新生成后的回复';
 const secondSignature = vm.runInContext('latestAssistantSignature()', sandbox);
 assert.notEqual(firstSignature, secondSignature);
 
+contextValue.chat = [
+  { is_user: true, is_system: false, mes: '第二天清晨，我带着早餐去敲他的门。', extra: { reasoning: 'User 隐藏推理中的日期不得参与判断。' } },
+  { is_user: false, is_system: false, mes: '他披着外套来开门，眼睛还没有完全睁开。', swipe_id: 0, extra: { reasoning: '一个月后再推进剧情。' } },
+];
+const userDatedExchange = vm.runInContext('latestStoryExchangeInfo()', sandbox);
+assert.match(userDatedExchange.content, /第二天清晨/);
+assert.match(userDatedExchange.content, /他披着外套来开门/);
+assert.doesNotMatch(userDatedExchange.content, /一个月后再推进剧情/);
+assert.equal(
+  vm.runInContext('detectStoryDayMarker(latestStoryExchangeInfo().content).label', sandbox),
+  '第二天',
+  '日期只出现在最新 User 输入时，也必须触发故事日变化',
+);
+
+contextValue.chat = [
+  { is_user: true, is_system: false, mes: '我仍坐在昨晚的窗边。' },
+  {
+    is_user: false,
+    is_system: false,
+    mes: '<Think>第二天清晨再让他离开。</Think>他把冷掉的茶重新热了一遍。',
+    swipe_id: 0,
+    extra: { reasoning: '一个月后安排重逢。' },
+  },
+];
+const reasoningOnlyDateExchange = vm.runInContext('latestStoryExchangeInfo()', sandbox);
+assert.doesNotMatch(reasoningOnlyDateExchange.content, /第二天清晨再让他离开/);
+assert.doesNotMatch(reasoningOnlyDateExchange.content, /一个月后安排重逢/);
+assert.equal(
+  vm.runInContext('detectStoryDayMarker(latestStoryExchangeInfo().content)', sandbox),
+  null,
+  '思维链中的日期不得触发自动手札',
+);
+
+contextValue.powerUserSettings = { reasoning: { prefix: '[analysis]', suffix: '[/analysis]' } };
+assert.equal(
+  vm.runInContext(`detectStoryDayMarker('[analysis]第二天清晨再推进剧情。[/analysis]他仍坐在原处。')`, sandbox),
+  null,
+  'SillyTavern 自定义思维链边界中的日期不得参与判断',
+);
+delete contextValue.powerUserSettings;
+assert.equal(
+  vm.runInContext(`detectStoryDayMarker('<think>第二天清晨再推进剧情。')`, sandbox),
+  null,
+  '未闭合的思维链块不得泄漏日期',
+);
+
 const relativeDayMarker = vm.runInContext(`detectStoryDayMarker('次日清晨，窗外的雨已经停了。')`, sandbox);
 assert.equal(relativeDayMarker.type, 'relative');
 assert.equal(relativeDayMarker.label, '次日');
@@ -466,6 +512,8 @@ assert.equal(midReplyDayMarker.type, 'relative', '故事时间标记不应只在
 assert.equal(midReplyDayMarker.spanDays, 30, '正文中段的长时间跨度必须被识别');
 const lateReplyDayMarker = vm.runInContext(`detectStoryDayMarker('很长的铺垫。'.repeat(450) + '第二天清晨，他终于推开了门。')`, sandbox);
 assert.equal(lateReplyDayMarker.type, 'relative', '长回复后段的跨日标记也必须被识别');
+const veryLateReplyDayMarker = vm.runInContext(`detectStoryDayMarker('很长的铺垫。'.repeat(1200) + '第二天清晨，他终于推开了门。')`, sandbox);
+assert.equal(veryLateReplyDayMarker.type, 'relative', '超过旧版 6000 字扫描上限的日期也必须被识别');
 assert.equal(
   vm.runInContext(`detectStoryDayMarker('他说：“一个月后再见。”她没有回答。')`, sandbox),
   null,

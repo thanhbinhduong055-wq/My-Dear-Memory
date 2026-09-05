@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.21.2';
+const PLUGIN_VERSION = '0.21.3';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1327,6 +1327,50 @@ function createId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripReasoningBlocks(content = '') {
+  let text = String(content || '');
+  const reasoning = ctx().powerUserSettings?.reasoning || {};
+  const configuredPrefix = String(reasoning.prefix || '').trim();
+  const configuredSuffix = String(reasoning.suffix || '').trim();
+  if (configuredPrefix) {
+    const prefixPattern = escapeRegExp(configuredPrefix);
+    if (configuredSuffix && configuredPrefix !== configuredSuffix) {
+      text = text.replace(
+        new RegExp(`${prefixPattern}[\\s\\S]*?${escapeRegExp(configuredSuffix)}`, 'gi'),
+        ' ',
+      );
+    }
+    // An interrupted generation can leave the configured reasoning prefix
+    // without its suffix. Everything after that prefix is still non-visible
+    // model reasoning and must not drive the story clock.
+    text = text.replace(new RegExp(`${prefixPattern}[\\s\\S]*$`, 'gi'), ' ');
+  }
+  text = text
+    .replace(/<\s*(think(?:ing)?|reasoning|analysis|reflection|thought|chain[-_ ]?of[-_ ]?thought)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, ' ')
+    .replace(/<\|(?:begin_of_thought|start_of_thought)\|>[\s\S]*?<\|(?:end_of_thought|finish_of_thought)\|>/gi, ' ')
+    .replace(/<\s*(?:think(?:ing)?|reasoning|analysis|reflection|thought|chain[-_ ]?of[-_ ]?thought)\b[^>]*>[\s\S]*$/gi, ' ')
+    .replace(/<\|(?:begin_of_thought|start_of_thought)\|>[\s\S]*$/gi, ' ');
+  return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function visibleMessageContent(message) {
+  // SillyTavern stores CoT separately in message.extra.reasoning. Deliberately
+  // read only `mes`, then remove leaked inline reasoning wrappers as a guard.
+  return stripReasoningBlocks(message?.mes);
+}
+
+function contentHash(content = '') {
+  let hash = 0;
+  for (let index = 0; index < content.length; index += 1) {
+    hash = ((hash << 5) - hash + content.charCodeAt(index)) | 0;
+  }
+  return hash;
+}
+
 function latestAssistantSignature() {
   return latestAssistantInfo()?.signature || null;
 }
@@ -1336,18 +1380,41 @@ function latestAssistantInfo() {
   const chat = Array.isArray(context.chat) ? context.chat : [];
   for (let index = chat.length - 1; index >= 0; index -= 1) {
     const message = chat[index];
-    if (!message?.is_user && !message?.is_system && String(message?.mes || '').trim()) {
-      const content = String(message.mes);
-      let hash = 0;
-      for (let i = 0; i < content.length; i += 1) hash = ((hash << 5) - hash + content.charCodeAt(i)) | 0;
+    const content = visibleMessageContent(message);
+    if (!message?.is_user && !message?.is_system && content) {
       return {
-        signature: `${identity().chatId}:${index}:${message.swipe_id ?? 0}:${hash}`,
+        signature: `${identity().chatId}:${index}:${message.swipe_id ?? 0}:${contentHash(content)}`,
         content,
         index,
       };
     }
   }
   return null;
+}
+
+function latestStoryExchangeInfo() {
+  const assistant = latestAssistantInfo();
+  if (!assistant) return null;
+  const chat = Array.isArray(ctx().chat) ? ctx().chat : [];
+  const userParts = [];
+  let userIndex = null;
+  for (let index = assistant.index - 1; index >= 0; index -= 1) {
+    const message = chat[index];
+    if (!message || message.is_system) continue;
+    if (!message.is_user) break;
+    const content = visibleMessageContent(message);
+    if (!content) continue;
+    userParts.unshift(content);
+    userIndex = index;
+  }
+  const userContent = userParts.join('\n\n');
+  return {
+    ...assistant,
+    assistantContent: assistant.content,
+    userContent,
+    userIndex,
+    content: [userContent, assistant.content].filter(Boolean).join('\n\n'),
+  };
 }
 
 function chineseQuantity(value) {
@@ -1401,14 +1468,13 @@ function storyPeriod(fromKey, fromLabel, marker) {
 }
 
 function detectStoryDayMarker(content = '') {
-  const head = String(content)
+  const head = stripReasoningBlocks(content)
     .replace(/<[^>]+>/g, ' ')
     .replace(/\r\n?/g, '\n')
     .replace(/^[\s\u3000*_#>`【\[（(—-]+/, '')
     .replace(/[\t\u3000 ]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
-    .trim()
-    .slice(0, 6000);
+    .trim();
   if (!head) return null;
 
   const candidates = [];
@@ -1447,18 +1513,18 @@ function detectStoryDayMarker(content = '') {
   return candidates.sort((left, right) => left.index - right.index).at(-1)?.marker || null;
 }
 
-function observeStoryDay(book, assistantInfo) {
+function observeStoryDay(book, storyInfo) {
   book.timeline = Object.assign(
     { currentDayKey: null, currentDayLabel: '', daySequence: 0, lastObservedSignature: null, lastUpdatedDayKey: null },
     book.timeline || {},
   );
   const timeline = book.timeline;
-  const signature = assistantInfo?.signature || null;
+  const signature = storyInfo?.signature || null;
   if (!signature || timeline.lastObservedSignature === signature) {
     return { shouldUpdate: false, reason: 'duplicate', marker: null };
   }
 
-  const marker = detectStoryDayMarker(assistantInfo.content);
+  const marker = detectStoryDayMarker(storyInfo.content);
   timeline.lastObservedSignature = signature;
   if (!timeline.currentDayKey) {
     timeline.currentDayKey = marker?.type === 'absolute' ? marker.key : 'story-day:0';
@@ -1789,7 +1855,8 @@ function packRecentChat(messages, maxLength = 18000) {
   let remaining = maxLength;
   for (let index = messages.length - 1; index >= 0 && remaining > 400; index -= 1) {
     const message = messages[index];
-    const content = clipContextText(message.mes, Math.min(5000, remaining));
+    const content = clipContextText(visibleMessageContent(message), Math.min(5000, remaining));
+    if (!content) continue;
     remaining -= content.length;
     packed.unshift({ role: message.is_user ? 'user' : 'assistant', content });
   }
@@ -1812,7 +1879,9 @@ async function buildSecondaryApiMessages(prompt) {
   const character = activeCharacterContext(context);
   const persona = userPersonaContext(context);
   const visibleChat = (Array.isArray(context.chat) ? context.chat : [])
-    .filter(message => !message?.is_system && typeof message?.mes === 'string' && message.mes.trim())
+    .filter(message => !message?.is_system && typeof message?.mes === 'string')
+    .map(message => ({ ...message, mes: visibleMessageContent(message) }))
+    .filter(message => message.mes)
     .slice(-28);
   const scanChat = visibleChat.map(message => `${message.is_user ? id.userName : id.characterName}: ${message.mes}`).reverse();
   let worldInfo = '';
@@ -2188,8 +2257,8 @@ function scheduleAutoGeneration() {
   if ((!getSettings().followMainGeneration && !queuedType) || journalGenerationActive || !mainGenerationCycleSeen) return;
   clearTimeout(autoGenerationTimer);
   autoGenerationTimer = setTimeout(async () => {
-    const assistantInfo = latestAssistantInfo();
-    const signature = assistantInfo?.signature || null;
+    const storyInfo = latestStoryExchangeInfo();
+    const signature = storyInfo?.signature || null;
     const hasNewAssistantContent = signature && signature !== mainGenerationStartSignature;
     if (!hasNewAssistantContent) {
       if (autoGenerationRetries < 10) {
@@ -2222,7 +2291,7 @@ function scheduleAutoGeneration() {
       return;
     }
     if (getSettings().followMainGeneration) {
-      const decision = observeStoryDay(currentBook, assistantInfo);
+      const decision = observeStoryDay(currentBook, storyInfo);
       await saveBook();
       if (decision.shouldUpdate) {
         setStatus(`已跨日，正在整理${decision.completedDayLabel || '上一故事日'}…`);

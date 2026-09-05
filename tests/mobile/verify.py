@@ -37,9 +37,9 @@ with sync_playwright() as p:
   print('\n=== 4. 实际运行版本 ===')
   c=ctx(b); pg=c.new_page(); pg.goto(BASE,wait_until='networkidle'); pg.wait_for_timeout(600)
   rt=pg.evaluate("()=>({v:window.__stPrivateJournalRuntime.version, html:document.documentElement.dataset.privateJournalVersion, root:document.querySelector('#private-journal').dataset.pluginVersion})")
-  check('runtime.version === 0.21.2', rt['v']=='0.21.2', rt)
-  check('documentElement dataset marker', rt['html']=='0.21.2', rt)
-  check('root dataset marker', rt['root']=='0.21.2', rt)
+  check('runtime.version === 0.21.3', rt['v']=='0.21.3', rt)
+  check('documentElement dataset marker', rt['html']=='0.21.3', rt)
+  check('root dataset marker', rt['root']=='0.21.3', rt)
 
   print('\n=== 9. 资源 URL（module 下 currentScript 为 null）===')
   a=pg.evaluate("()=>window.__stPrivateJournalRuntime.assets()")
@@ -52,7 +52,7 @@ with sync_playwright() as p:
 
   print('\n=== 8. 样式表健康 ===')
   ss=pg.evaluate("()=>window.__stPrivateJournalRuntime.stylesheet()")
-  check('stylesheet ok + marker matches', ss['status']=='ok' and ss['marker']=='0.21.2', ss)
+  check('stylesheet ok + marker matches', ss['status']=='ok' and ss['marker']=='0.21.3', ss)
   c.close()
 
   print('\n=== 10. 正文停止后释放生成锁 ===')
@@ -110,10 +110,10 @@ with sync_playwright() as p:
   check('elementsFromPoint top-10 captured', len(probes[0]['stack'])>0 and len(probes[0]['stack'])<=10)
   c.close()
 
-  print('\n=== 8b. 过期 CSS（JS 0.21.2 + CSS 0.21.1 缓存）===')
+  print('\n=== 8b. 过期 CSS（JS 0.21.3 + CSS 0.21.2 缓存）===')
   c=ctx(b); pg=c.new_page()
   def stale(route):
-    body=open(__import__('pathlib').Path(__file__).resolve().parents[2]/'style.css',encoding='utf-8').read().replace('--pj-stylesheet-version:"0.21.2"','--pj-stylesheet-version:"0.21.1"')
+    body=open(__import__('pathlib').Path(__file__).resolve().parents[2]/'style.css',encoding='utf-8').read().replace('--pj-stylesheet-version:"0.21.3"','--pj-stylesheet-version:"0.21.2"')
     route.fulfill(status=200,content_type='text/css',body=body)
   pg.route('**/cand/style.css', stale)
   errs=[]; toasts=[]
