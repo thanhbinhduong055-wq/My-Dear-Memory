@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.22.0';
+const PLUGIN_VERSION = '0.23.1';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -98,6 +98,7 @@ const DEFAULTS = {
   followMainGeneration: true,
   theme: 'botanical-noir',
   desk: 'pearl-cream',
+  font: 'song',
   generationApiMode: 'main',
   secondaryApiKey: '',
   secondaryProfileId: '',
@@ -204,6 +205,7 @@ const PAGE_TYPES = {
     empty: '在每一天放一枚小小的心情标记。',
     instruction: '月历由 User 手动标记，不调用模型生成。',
   },
+  mail: { label: '日历信箱', icon: '💌', empty: '把想说的话，寄给未来的你。', instruction: '信件由 User 手动寄送，不调用模型。' },
   quote_note: {
     label: '小纸条',
     icon: '❝',
@@ -238,6 +240,13 @@ const THEMES = {
   'indigo-reed': { label: '蓝染芒影', shortLabel: '蓝染', asset: './assets/themes/cutouts/indigo-reed.webp' },
   'italian-marble': { label: '托斯卡纳纹理', shortLabel: '纹理', asset: './assets/themes/cutouts/italian-marble.webp' },
   'magnolia-swallow': { label: '玉兰燕影', shortLabel: '玉兰', asset: './assets/themes/cutouts/magnolia-swallow.webp' },
+};
+
+const FONTS = {
+  song: { label: '宋体 · 书卷', family: '"PJ Song","Songti SC","SimSun",serif' },
+  running: { label: '中文行书 · 志莽', family: '"PJ Running","STXingkai","KaiTi",serif' },
+  script: { label: '英文花体 · Great Vibes', family: '"PJ Script","PJ Song","Songti SC",serif' },
+  sans: { label: '清晰黑体 · 系统', family: '"Noto Sans SC","Microsoft YaHei","PingFang SC",system-ui,sans-serif' },
 };
 
 const DESKS = {
@@ -913,12 +922,10 @@ function updateMailClock(book) {
   const info = latestStoryExchangeInfo();
   const clock = book.mailClock ||= { date: '', signature: '' };
   if (!info || info.signature === clock.signature) return clock.date;
-  const marker = detectStoryDayMarker(info.content);
-  const absolute = marker?.type === 'absolute' ? marker.key.replace(/^date:/, '') : '';
-  let date = clock.date;
-  if (!validMailDate(date)) {
-    // First use: replay completed visible exchanges so several relative days
-    // after an explicit date survive creating the first scheduled letter.
+  let date = '';
+  {
+    // Replay completed exchanges, including all days missed while this chat
+    // was closed. Incrementing only the latest exchange loses intervening days.
     const userParts = [];
     for (let i = 0; i <= info.index; i++) {
       const message = ctx().chat[i];
@@ -937,13 +944,6 @@ function updateMailClock(book) {
     clock.date = validMailDate(date) ? date : '';
     return clock.date;
   }
-  if (validMailDate(absolute)) date = absolute;
-  else if (marker?.type === 'relative' && validMailDate(date)) {
-    date = new Date(Date.parse(`${date}T00:00:00Z`) + marker.spanDays * 86400000).toISOString().slice(0, 10);
-  }
-  clock.signature = info.signature;
-  clock.date = validMailDate(date) ? date : '';
-  return clock.date;
 }
 
 async function deliverScheduledMail(book, mail) {
@@ -988,18 +988,25 @@ async function deliverScheduledMail(book, mail) {
 
 async function checkScheduledMail() {
   const book = currentBook;
-  if (!book || currentBookStorageKey !== storageKey() || mainGenerationActive || journalGenerationActive || relationshipCheckActive || hostReportsMainGenerationActive()) return;
-  if (!book.scheduledMail?.length) return;
+  if (!book || currentBookStorageKey !== storageKey()) return;
+  if (mainGenerationActive || journalGenerationActive || relationshipCheckActive || hostReportsMainGenerationActive()) {
+    if (book.scheduledMail?.some(mail => mail.status === 'pending')) scheduleMailCheck();
+    return;
+  }
   const key = storageKey();
   const previousClock = JSON.stringify(book.mailClock);
   const date = updateMailClock(book);
-  if (previousClock !== JSON.stringify(book.mailClock)) await saveSpecificBook(book, key);
+  if (previousClock !== JSON.stringify(book.mailClock)) {
+    if (book.scheduledMail?.length) await saveSpecificBook(book, key);
+    if (book === currentBook && ['calendar', 'mail'].includes(activeType)) render();
+  }
   if (book !== currentBook || key !== storageKey()) return;
   if (!validMailDate(date)) return;
   for (const item of normalizeScheduledMail(book.scheduledMail)) {
     if (item.status !== 'pending' || item.date > date) continue;
     if (book !== currentBook) break;
-    await deliverScheduledMail(book, book.scheduledMail.find(mail => mail.id === item.id));
+    try { await deliverScheduledMail(book, book.scheduledMail.find(mail => mail.id === item.id)); }
+    catch (error) { logLifecycle('mail:delivery', error); }
   }
 }
 
@@ -1305,7 +1312,7 @@ function extractLooseField(text, field, nextFields = []) {
     const boundary = new RegExp(`["']\\s*,\\s*["'](?:${nextFields.join('|')})["']\\s*:`, 'i').exec(tail);
     if (boundary) return decodeLooseText(tail.slice(0, boundary.index));
   }
-  const finalQuote = /["']\s*(?:,|}|$)/.exec(tail);
+  const finalQuote = [...tail.matchAll(/["']\s*(?=[,}]?\s*$)/g)].at(-1);
   return decodeLooseText(finalQuote ? tail.slice(0, finalQuote.index) : tail);
 }
 
@@ -1318,6 +1325,7 @@ function parseLooseJsonPage(text, type = activeType) {
     dateLabel: extractLooseField(text, 'dateLabel', ['mood', 'perspective', 'body']) || '此刻',
     mood: extractLooseField(text, 'mood', ['perspective', 'body']) || '未命名的心绪',
     body,
+    incomplete: !/["']\s*(?:,\s*["'][\w]+["']\s*:[\s\S]*)?}\s*$/.test(text),
     confidence: /["']confidence["']\s*:\s*["'](high|medium|low)["']/i.exec(text)?.[1] || 'low',
   });
 }
@@ -1727,7 +1735,7 @@ function setGeneratingUi(generating) {
   const button = root?.querySelector('[data-action="generate"]');
   if (!button) return;
   const isQuote = activeType === 'quote_note';
-  const isCalendar = activeType === 'calendar';
+  const isCalendar = activeType === 'calendar' || activeType === 'mail';
   button.hidden = isCalendar;
   button.disabled = isCalendar || generating || (isQuote && !quoteDraft.trim());
   button.textContent = generating ? '正在拾取回忆…' : (isQuote ? '保存小纸条' : `生成${PAGE_TYPES[activeType]?.label || '这一页'}`);
@@ -2150,6 +2158,62 @@ async function callJournalApi(prompt, maxTokens = 5200) {
     : callCurrentMainApi(prompt, maxTokens);
 }
 
+function journalResponseIncomplete(raw) {
+  const text = stripResponseFence(raw);
+  if (/<journal_batch\b/i.test(text)) return !/<\/journal_batch>\s*$/i.test(text)
+    || [...text.matchAll(/<body\b[^>]*>/gi)].length !== [...text.matchAll(/<\/body\s*>/gi)].length;
+  if (/<journal_page\b/i.test(text)) return !/<\/journal_page>\s*$/i.test(text) || !/<\/body\s*>/i.test(text);
+  if (/<page\b/i.test(text)) return !/<\/page>\s*$/i.test(text)
+    || [...text.matchAll(/<body\b[^>]*>/gi)].length !== [...text.matchAll(/<\/body\s*>/gi)].length;
+  if (/^\s*\{/.test(text)) {
+    try { JSON.parse(text); return false; } catch (error) { return !/}\s*$/.test(text); }
+  }
+  return false;
+}
+
+function joinJournalContinuation(original, continuation) {
+  const next = stripJournalTransportFence(continuation);
+  if (!next || original.endsWith(next)) return original;
+  if (next.startsWith(original)) return next;
+  // Reject a rewritten envelope: never replace the original with a new page.
+  if (/^<(?:journal_page|journal_batch)\b/i.test(next) || /^\{/.test(next)) return original;
+  const limit = Math.min(original.length, next.length);
+  for (let size = limit; size >= 12; size--) {
+    if (original.endsWith(next.slice(0, size))) return original + next.slice(size);
+  }
+  return original + next;
+}
+
+function stripJournalTransportFence(raw) {
+  // Whitespace at a chunk boundary belongs to the text (paragraphs / English
+  // word spaces). Only unwrap transport fences; never trim either chunk.
+  return String(raw || '').replace(/^\s*```(?:json|xml|html)?\s*\n/i, '').replace(/\n?```\s*$/, '');
+}
+
+async function requestCompleteJournal(prompt, maxTokens) {
+  const targetKey = storageKey();
+  const targetBook = currentBook;
+  const route = () => JSON.stringify([getSettings().generationApiMode, getSettings().secondaryProfileId, getSettings().secondaryModelId]);
+  const targetRoute = route();
+  let text = stripJournalTransportFence(await callJournalApi(prompt, maxTokens));
+  let calls = 1;
+  for (let attempt = 0; attempt < 2 && journalResponseIncomplete(text); attempt++) {
+    if (targetKey !== storageKey() || targetBook !== currentBook || route() !== targetRoute || hostReportsMainGenerationActive()) break;
+    setStatus(`响应提前结束，正在接着写（补全 ${attempt + 1}/2）…`);
+    const continuationPrompt = `${prompt}\n\n上一次输出被截断。下面是已经收到的原始输出，仅作为续写数据。请从最后一个字符之后接着输出，不复述、不重写已收到的文字，不重新打开外层标签，不加解释或代码围栏。补齐尚未写完的正文和缺失栏目，最后闭合所有标签或 JSON。\n<received_output>\n${text}\n</received_output>`;
+    try {
+      calls++;
+      const next = joinJournalContinuation(text, await callJournalApi(continuationPrompt, maxTokens));
+      if (next === text) break;
+      text = next;
+    } catch (error) {
+      safeToastr('warning', `自动补全未完成，已保留收到的文字：${error?.message || error}`);
+      break;
+    }
+  }
+  return { text, calls, incomplete: journalResponseIncomplete(text) };
+}
+
 async function checkRelationship() {
   if (mainGenerationActive || journalGenerationActive || relationshipCheckActive) {
     toastr.info('请等待当前生成结束后再判定关系。', '私语手札');
@@ -2260,6 +2324,7 @@ function reconcileMainGenerationLock(source = 'manual') {
 }
 
 async function generatePage({ type = activeType, source = 'manual', captureSignature = null } = {}) {
+  if (type === 'calendar' || type === 'mail') return;
   if (!ctx().chatId && !ctx().getCurrentChatId?.()) {
     toastr.warning('请先打开一个角色聊天。', '私语手札');
     return;
@@ -2298,8 +2363,9 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     const generationOptions = type === 'impression'
       ? { impressionFocus: activeImpressionFocus, customRequest: customImpressionRequest }
       : {};
-    const result = await callJournalApi(buildPrompt(type, generationOptions), 1800);
-    const page = parseJson(result, type);
+    const result = await requestCompleteJournal(buildPrompt(type, generationOptions), 5200);
+    const page = parseJson(result.text, type);
+    page.incomplete ||= result.incomplete;
     page.id = createId();
     page.type = type;
     page.createdAt = new Date().toISOString();
@@ -2355,8 +2421,8 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
   const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
   setStatus(`正文完成，正在用一次${apiLabel}同步全部手札…`);
   try {
-    const result = await callJournalApi(buildBatchPrompt(batchOptions), batchOutputBudget(batchOptions));
-    const batch = parseBatch(result);
+    const result = await requestCompleteJournal(buildBatchPrompt(batchOptions), batchOutputBudget(batchOptions));
+    const batch = parseBatch(result.text);
     const manualRelationship = targetBook.relationship?.source === 'user' && targetBook.relationship?.status === 'partners';
     if (!manualRelationship && batch.relationship) targetBook.relationship = batch.relationship;
     const romanceAllowed = targetBook.relationship?.status === 'partners';
@@ -2397,15 +2463,15 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
     await saveSpecificBook(targetBook, targetStorageKey);
     if (currentBook === targetBook) render();
     const incompleteTypes = pages.filter(item => item.page.incomplete).map(item => PAGE_TYPES[item.type].label);
-    if (incompleteTypes.length) {
-      setStatus(`已保留文字，${incompleteTypes.join('、')}响应未写完`);
-      safeToastr('warning', '模型响应提前结束，未写完的页面已标注。可在对应栏目手动重新生成；不会自动追加 API。');
+    if (incompleteTypes.length || result.incomplete) {
+      setStatus(`已保留文字，${incompleteTypes.join('、') || '批量'}响应未写完`);
+      safeToastr('warning', '补全后仍有未写完的页面，已保留并标注。可编辑补全或手动重新生成。');
     } else if (missingTypes.length) {
       const missingLabels = missingTypes.map(type => PAGE_TYPES[type].label).join('、');
       setStatus(`已保存 ${pages.length} 个板块；响应缺少：${missingLabels}`);
-      toastr.warning(`本轮只解析到 ${pages.length} 个板块，缺少：${missingLabels}。未追加 API 请求。`, '私语手札', { timeOut: 10000 });
+      toastr.warning(`本轮保存 ${pages.length} 个板块，缺少：${missingLabels}。共请求 ${result.calls} 次。`, '私语手札', { timeOut: 10000 });
     } else {
-      setStatus(`本轮一次 API 已同步 ${pages.length} 个板块`);
+      setStatus(`本轮已同步 ${pages.length} 个板块（${result.calls} 次请求）`);
       toastr.success(`本轮手札已更新 ${pages.length} 个板块。`, '私语手札');
     }
     return true;
@@ -2767,7 +2833,7 @@ function buildWordDocumentParts(book = currentBook) {
   const exportedAt = new Date().toLocaleString('zh-CN', { hour12: false });
   const sections = [];
   for (const [type, meta] of Object.entries(PAGE_TYPES)) {
-    if (type === 'calendar') continue;
+    if (type === 'calendar' || type === 'mail') continue;
     const entries = pagesForType({ pages }, type).slice().reverse();
     if (!entries.length) continue;
     sections.push(wordParagraph(meta.label, 'Heading1'));
@@ -2971,6 +3037,7 @@ function renderCalendar() {
     return `<button type="button" class="${classes}" data-calendar-day="${cell.dateKey}" aria-label="${model.month}月${cell.day}日${cell.emoji ? `，${escapeHtml(cell.emoji)}` : ''}${mails.length ? `，${mails.length}封信` : ''}" aria-pressed="${selected}"><span>${cell.day}</span><strong>${escapeHtml(cell.emoji)}</strong>${mails.length ? `<small class="pj-mail-dot">✉ ${mails.length}</small>` : ''}</button>`;
   }).join('');
   return `<section class="pj-calendar" aria-label="${escapeHtml(model.label)}心情月历">
+    <button type="button" class="pj-primary pj-mail-shortcut" data-type="mail">打开日历信箱 · 写信 / 查收寄送记录</button>
     <div class="pj-calendar-weekdays" aria-hidden="true">${weekdays.map(day => `<span>${day}</span>`).join('')}</div>
     <div class="pj-calendar-grid">${cells}</div>
     <p class="pj-calendar-hint">轻触日期，再从上方挑一枚 Emoji。月历会和文字手札一起随当前聊天保存。</p>
@@ -2979,20 +3046,22 @@ function renderCalendar() {
 }
 
 function renderMailComposer() {
-  const items = normalizeScheduledMail(currentBook?.scheduledMail).filter(mail => mail.date === selectedCalendarDate);
+  const allMail = normalizeScheduledMail(currentBook?.scheduledMail);
+  const items = activeType === 'mail' ? allMail : allMail.filter(mail => mail.date === selectedCalendarDate);
   const letters = pagesForType(currentBook, 'love_letter');
   const clock = currentBook?.mailClock?.date || '';
   return `<section class="pj-mail" aria-label="日历信箱">
-    <h3>寄给未来的你</h3>
+    <h3>日历信箱 · 寄给未来的你</h3>
     <p>按故事日期寄送。信件会出现在当前聊天中，下一轮正文可回应信件；寄出本身不调用模型。</p>
     <p class="pj-mail-clock">${clock ? `当前故事日期：${escapeHtml(clock)}` : '尚未识别完整故事日期，请在正文写明年月日。也可选择立即寄出。'}</p>
     <label>预约寄送日期<input type="date" data-mail-date value="${escapeHtml(selectedCalendarDate)}"></label>
     <label>信件类型<select data-mail-kind><option value="card" ${mailDraft.kind === 'card' ? 'selected' : ''}>贺卡</option><option value="letter" ${mailDraft.kind === 'letter' ? 'selected' : ''}>情书</option></select></label>
-    ${letters.length ? `<label>从已保存情书填入<select data-mail-import><option value="">选择一封情书…</option>${letters.map(page => `<option value="${escapeHtml(page.id)}">${escapeHtml(page.title)} · ${escapeHtml(page.dateLabel)}</option>`).join('')}</select></label>` : ''}
+    <label>从已保存情书填入<select data-mail-import ${letters.length ? '' : 'disabled'}><option value="">${letters.length ? '选择一封情书…' : '先在情书栏目生成或保存一封情书'}</option>${letters.map(page => `<option value="${escapeHtml(page.id)}">${escapeHtml(page.title)} · ${escapeHtml(page.dateLabel)}</option>`).join('')}</select></label>
     <label>写给 ${escapeHtml(identity().characterName)}<textarea data-mail-body maxlength="12000" rows="6" placeholder="想在那一天对你说…">${escapeHtml(mailDraft.body)}</textarea></label>
     <div class="pj-mail-actions"><button type="button" class="pj-primary" data-action="mail-schedule">封好，预约寄送</button><button type="button" class="pj-secondary" data-action="mail-now">立即寄出</button></div>
     <p>到达或跨过所选日期时，在本轮正文结束后寄出。关闭酒馆期间不会运行；重新打开聊天后会检查到期信件。</p>
-    <div class="pj-mail-list">${items.map(mail => `<details><summary>${mail.kind === 'letter' ? '情书' : '贺卡'} · ${{ pending: '待寄出', sent: '已寄出', cancelled: '已取消' }[mail.status]}</summary><div class="pj-mail-text">${escapeHtml(mail.body)}</div>${mail.error ? `<p role="alert">${escapeHtml(mail.error)}</p>` : ''}${mail.status === 'pending' ? `<div class="pj-mail-actions"><button type="button" data-mail-send="${escapeHtml(mail.id)}">${mail.error ? '重试寄送' : '现在寄出'}</button><button type="button" data-mail-cancel="${escapeHtml(mail.id)}">取消预约</button></div>` : ''}</details>`).join('') || '<p>这一天还没有预约信件。</p>'}</div>
+    <h4>${activeType === 'mail' ? '全部信件' : '当天信件'} · ${items.length} 封</h4>
+    <div class="pj-mail-list">${items.map(mail => `<details ${mail.status === 'pending' ? 'open' : ''}><summary>${mail.kind === 'letter' ? '情书' : '贺卡'} · ${{ pending: '待寄出', sent: '已寄出', cancelled: '已取消' }[mail.status]}</summary><p>${escapeHtml(mail.date)} · ${escapeHtml(mail.sender)} → ${escapeHtml(mail.recipient)}</p><div class="pj-mail-text">${escapeHtml(mail.body)}</div>${mail.status === 'sent' ? '<p>已进入当前聊天，下一轮角色回复可回应。</p>' : ''}${mail.error ? `<p role="alert">${escapeHtml(mail.error)}</p>` : ''}${mail.status === 'pending' ? `<div class="pj-mail-actions"><button type="button" data-mail-send="${escapeHtml(mail.id)}">${mail.error ? '重试寄送' : '现在寄出'}</button><button type="button" data-mail-cancel="${escapeHtml(mail.id)}">取消预约</button></div>` : ''}</details>`).join('') || '<p>还没有预约信件。</p>'}</div>
   </section>`;
 }
 
@@ -3006,6 +3075,12 @@ function renderAccessories() {
   settings.desk = deskKey;
   root.dataset.theme = themeKey;
   root.dataset.desk = deskKey;
+  const fontKey = FONTS[settings.font] ? settings.font : DEFAULTS.font;
+  settings.font = fontKey;
+  root.dataset.font = fontKey;
+  root.style.setProperty('--pj-font-prose', FONTS[fontKey].family);
+  const fontSelect = root.querySelector('[data-setting="font"]');
+  if (fontSelect) fontSelect.value = fontKey;
   root.classList.toggle('book-open', bookOpen);
 
   const coverArt = root.querySelector('.pj-cover-art');
@@ -3136,21 +3211,21 @@ function render() {
   root.dataset.activeType = activeType;
   root.querySelector('.pj-title').textContent = `${id.userName} × ${id.characterName}`;
   root.querySelector('.pj-tabs').innerHTML = Object.entries(PAGE_TYPES).map(([key, value]) =>
-    `<button class="${key === activeType ? 'active' : ''}" data-type="${key}" role="tab" aria-selected="${key === activeType}"><span>${value.icon}</span>${value.label}${key === 'romance_diary' && !isRomanceUnlocked() ? '<small>锁</small>' : ''}</button>`).join('');
+    `<button class="${key === activeType ? 'active' : ''}" data-type="${key}" role="tab" aria-label="${escapeHtml(value.label)}" title="${escapeHtml(value.label)}" aria-selected="${key === activeType}"><span>${value.icon}</span>${value.label}${key === 'romance_diary' && !isRomanceUnlocked() ? '<small>锁</small>' : ''}</button>`).join('');
   const bookmarkLabel = root.querySelector('.pj-bookmark-label');
   if (bookmarkLabel) bookmarkLabel.textContent = PAGE_TYPES[activeType]?.label || '手札';
   renderControls();
   const visiblePages = pagesForType(currentBook, activeType);
   root.querySelector('.pj-pages').innerHTML = activeType === 'calendar'
     ? renderCalendar()
-    : (visiblePages.length
+    : activeType === 'mail' ? renderMailComposer() : (visiblePages.length
       ? visiblePages.map(renderPage).join('')
       : `<div class="pj-empty">${escapeHtml(PAGE_TYPES[activeType]?.empty || '纸页还是空白。')}<br><small>${activeType === 'romance_diary' && !isRomanceUnlocked() ? '先确认关系，再记录只属于恋人的篇章。' : activeType === 'quote_note' ? '在正文里选中对白即可收藏，不会消耗 API。' : '生成后会独立保存于当前栏目。'}</small></div>`);
   const follow = root.querySelector('[data-setting="followMainGeneration"]');
   if (follow) follow.checked = Boolean(getSettings().followMainGeneration);
   renderApiRouter();
   const apiHost = root.querySelector('.pj-api-router-host');
-  if (apiHost) apiHost.hidden = activeType === 'calendar';
+  if (apiHost) apiHost.hidden = activeType === 'calendar' || activeType === 'mail';
   setGeneratingUi(journalGenerationActive);
   const generateButton = root.querySelector('[data-action="generate"]');
   if (generateButton && activeType === 'romance_diary' && !isRomanceUnlocked()) generateButton.disabled = true;
@@ -3176,6 +3251,9 @@ function turnToType(type) {
   pageTurnSwapTimer = setTimeout(() => {
     activeType = type;
     render();
+    if (type === 'mail' || type === 'calendar') scheduleMailCheck();
+    const pane = root?.querySelector('.pj-pages');
+    if (pane) pane.scrollTop = 0;
     root?.classList.remove('page-turn-out');
     root?.classList.add('page-turn-in');
     pageTurnTimer = setTimeout(() => root?.classList.remove('page-turning', 'page-turn-in'), 320);
@@ -3203,13 +3281,16 @@ function bind() {
         if (mailCancel) {
           cancelScheduledMail(currentBook, mailCancel);
           await saveBook();
+          setStatus('预约已取消，不会寄出');
         } else if (mailSend) {
-          await deliverScheduledMail(currentBook, currentBook.scheduledMail.find(mail => mail.id === mailSend));
+          if (!await deliverScheduledMail(currentBook, currentBook.scheduledMail.find(mail => mail.id === mailSend))) setStatus('信件仍在待寄列表，请等待当前生成结束后重试');
         } else {
           const mail = createScheduledMail(currentBook, { ...mailDraft, date: selectedCalendarDate });
           await saveBook();
           mailDraft = { kind: 'card', body: '' };
-          if (action === 'mail-now') await deliverScheduledMail(currentBook, mail);
+          if (action === 'mail-now') {
+            if (!await deliverScheduledMail(currentBook, mail)) setStatus('信件已保存在待寄列表，请等待当前生成结束后重试');
+          }
           else { setStatus(`已预约 ${selectedCalendarDate} 寄出`); scheduleMailCheck(); }
         }
         render();
@@ -3324,6 +3405,11 @@ function bind() {
     }
   });
   root.addEventListener('change', event => {
+    if (event.target.matches('[data-setting="font"]') && FONTS[event.target.value]) {
+      getSettings().font = event.target.value;
+      ctx().saveSettingsDebounced?.();
+      renderAccessories();
+    }
     if (event.target.matches('[data-mail-kind]')) mailDraft.kind = event.target.value;
     if (event.target.matches('[data-mail-date]') && validMailDate(event.target.value)) {
       selectedCalendarDate = event.target.value;
@@ -3897,9 +3983,9 @@ async function initialize({ reason = 'bootstrap' } = {}) {
       <div class="pj-book">
         <button class="pj-bookmark" data-action="toggle-book" aria-label="合上手札" title="合上手札"><span class="pj-bookmark-label">印象</span><i></i></button>
         <div class="pj-page-turner" aria-hidden="true"></div>
-        <nav><h1 class="pj-title"></h1><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
+        <nav><h1 class="pj-title"></h1><details class="pj-font-menu"><summary>字体</summary><div class="pj-font-panel"><label>正文与信件字体<select data-setting="font">${Object.entries(FONTS).map(([key, font]) => `<option value="${key}">${font.label}</option>`).join('')}</select></label><p class="pj-font-preview">把今日写成回忆。<br>My dear, always with you.</p><small>即时预览并自动保存。英文花体的中文部分使用宋体。</small></div></details><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
         <div class="pj-tabs" role="tablist" aria-label="书签目录"></div><div class="pj-controls"></div><main class="pj-pages"></main>
-        <footer><div class="pj-footer-state"><label title="只在正文时间线跨入新的一天时，用一次 API 整理上一故事日"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><div class="pj-api-router-host"></div><span class="pj-status"></span><span class="pj-runtime-version">v${PLUGIN_VERSION}</span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
+        <footer><div class="pj-footer-state"><label title="故事跨日时通常请求一次；检测到截断时最多追加两次补全"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><div class="pj-api-router-host"></div><span class="pj-status"></span><span class="pj-runtime-version">v${PLUGIN_VERSION}</span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
       </div>
     </div>
     <div class="pj-style-palette" aria-label="选择手札装帧">
@@ -3969,7 +4055,9 @@ async function initialize({ reason = 'bootstrap' } = {}) {
     });
     bindContextEvent(eventSource, context.eventTypes?.CHARACTER_MESSAGE_RENDERED, () => {
       if (mainGenerationCycleSeen) releaseMainGenerationLock('character-message-rendered');
+      else scheduleMailCheck();
     });
+    bindContextEvent(eventSource, context.eventTypes?.MESSAGE_RECEIVED, scheduleMailCheck);
     if (thisInitialization !== initializationRevision) return false;
     void startBookLoad('initialize').catch(error => {
       logLifecycle('initialize:background-load', error);
