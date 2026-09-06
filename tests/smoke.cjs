@@ -62,11 +62,11 @@ assert.equal(vm.runInContext('DEFAULTS.secondaryApiKey', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryProfileId', sandbox), '');
 assert.equal(vm.runInContext('DEFAULTS.secondaryModelId', sandbox), '');
 assert.equal(vm.runInContext('BOOK_VERSION', sandbox), 10);
-assert.equal(manifest.version, '0.21.3');
+assert.equal(manifest.version, '0.22.0');
 assert.equal(vm.runInContext('PLUGIN_VERSION', sandbox), manifest.version);
 // JS and CSS are cached independently; the marker is what makes a stale
 // stylesheet detectable at runtime instead of silently breaking layout.
-assert.match(styleSource, /--pj-stylesheet-version:"0\.21\.3"/);
+assert.match(styleSource, /--pj-stylesheet-version:"0\.22\.0"/);
 assert.equal(
   styleSource.match(/--pj-stylesheet-version:"([^"]+)"/)[1],
   manifest.version,
@@ -116,9 +116,9 @@ assert.match(source, /按故事日自动整理/);
 assert.match(styleSource, /\.pj-tabs\s*\{[\s\S]*?position:absolute/);
 assert.match(source, /#extensions_settings,#extensions_settings2/);
 assert.match(source, /selectExtensionDrawerContainer/);
-assert.match(source, /PLUGIN_VERSION = '0\.21\.3'/);
-assert.match(manifest.js, /\?v=0\.21\.3$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
-assert.match(manifest.css, /\?v=0\.21\.3$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(source, /PLUGIN_VERSION = '0\.22\.0'/);
+assert.match(manifest.js, /\?v=0\.22\.0$/, '脚本 URL 需要版本查询参数来绕过手机浏览器旧缓存');
+assert.match(manifest.css, /\?v=0\.22\.0$/, '样式 URL 需要版本查询参数来绕过手机浏览器旧缓存');
 assert.match(source, /document\.createElement\('dialog'\)/, '手札必须进入浏览器 top layer，不能只依赖 z-index');
 assert.match(source, /root\.showModal\(\)/, '打开手札必须调用原生 dialog.showModal');
 assert.match(source, /privateJournalInstance/);
@@ -808,7 +808,7 @@ assert.match(monthDecision.period.label, /2025年1月1日/);
   vm.runInContext('currentBook = blankBook()', sandbox);
   await vm.runInContext(`generateBatch({ captureSignature: 'one-main-message' })`, sandbox);
   assert.equal(batchApiCalls, 1);
-  assert.equal(batchPromptOptions.responseLength, 5200, '一次批量生成必须申请足够的输出长度');
+  assert.equal(batchPromptOptions.responseLength, 10000, '一次批量生成必须为最后的恋爱日记预留输出长度');
   assert.equal(vm.runInContext('currentBook.pages.length', sandbox), 3);
   assert.equal(vm.runInContext(`currentBook.pages.some(page => 'song' in page || 'poem' in page || 'hasRoundAccompaniment' in page)`, sandbox), false);
 

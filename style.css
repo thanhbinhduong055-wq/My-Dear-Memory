@@ -25,7 +25,7 @@
   --pj-name-color:#34271f;
   --pj-pan-x:0px;
   --pj-pan-y:0px;
-  --pj-stylesheet-version:"0.21.3";
+  --pj-stylesheet-version:"0.22.0";
   position:fixed;
   inset:0;
   z-index:9999;
@@ -346,7 +346,7 @@
   width:100%;
   height:100%;
   display:grid;
-  grid-template-rows:auto auto 1fr auto;
+  grid-template-rows:auto auto minmax(0,1fr) auto;
   border:1px solid #c1ab80;
   border-radius:6px 18px 18px 7px;
   opacity:0;
@@ -575,7 +575,22 @@
 .pj-calendar-day.is-empty { border-color:transparent!important; background:transparent!important; }
 .pj-calendar-hint { margin:15px 0 0; color:#88766a; text-align:center; font:11px/1.6 var(--pj-font-ui); }
 
-.pj-pages { overflow:auto; padding:30px clamp(24px,5.2vw,68px) 78px; scrollbar-color:#aa906b66 transparent; scrollbar-width:thin; }
+.pj-pages { min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:30px clamp(24px,5.2vw,68px) 78px; scrollbar-color:#aa906b66 transparent; scrollbar-width:thin; }
+.pj-incomplete { padding:12px; color:#854b27; background:#fff0d8; border-left:3px solid #ba793d; font:14px/1.65 var(--pj-font-ui); }
+#private-journal .pj-mail { display:grid; gap:12px; margin-top:24px; padding:18px 12px; border-top:1px solid #aa906b66; color:#534039; font:14px/1.65 var(--pj-font-ui); min-width:0; }
+#private-journal .pj-mail h3,#private-journal .pj-mail p { margin:0; }
+#private-journal .pj-mail h3 { font:500 23px/1.4 var(--pj-font-prose); }
+#private-journal .pj-mail label { display:grid; gap:6px; min-width:0; }
+#private-journal .pj-mail input,#private-journal .pj-mail select,#private-journal .pj-mail textarea { box-sizing:border-box; width:100%; min-width:0; max-width:100%; border:1px solid #b9a588; border-radius:4px; padding:10px; background:#fffbf0; color:#49372f; font:16px/1.6 var(--pj-font-ui); }
+#private-journal .pj-mail textarea { min-height:140px; resize:vertical; }
+#private-journal .pj-mail input:focus-visible,#private-journal .pj-mail select:focus-visible,#private-journal .pj-mail textarea:focus-visible,#private-journal .pj-mail button:focus-visible { outline:2px solid var(--pj-accent); outline-offset:2px; }
+#private-journal .pj-mail-actions { display:flex; flex-wrap:wrap; gap:8px; }
+#private-journal .pj-mail-actions button { min-height:44px; white-space:normal; }
+#private-journal .pj-mail-list details { margin-top:8px; border-top:1px solid #aa906b44; padding-top:8px; }
+#private-journal .pj-mail-list summary { padding:10px 0; cursor:pointer; }
+#private-journal .pj-mail-text { white-space:pre-wrap; overflow-wrap:anywhere; margin:12px 0; }
+#private-journal .pj-mail-clock { color:#80584d; }
+#private-journal .pj-mail-dot { display:block; font:11px/1.2 var(--pj-font-ui); color:var(--pj-accent); }
 .pj-pages::-webkit-scrollbar { width:9px; }
 .pj-pages::-webkit-scrollbar-thumb { border:3px solid transparent; border-radius:99px; background:color-mix(in srgb,var(--pj-accent) 32%,transparent); background-clip:padding-box; }
 .pj-page { max-width:46rem; margin:0 auto 16px; overflow:hidden; border:1px solid rgba(122,91,53,.2); border-radius:3px; background:rgba(255,252,244,.52); box-shadow:0 6px 18px rgba(76,51,28,.07); transition:box-shadow 180ms ease,border-color 180ms ease,background-color 180ms ease; }
