@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const base = path.resolve(process.argv[2] || path.join(__dirname, '..'));
+const manifest = JSON.parse(fs.readFileSync(path.join(base, 'manifest.json'), 'utf8'));
+const js = fs.readFileSync(path.join(base, 'index.js'), 'utf8');
+const css = fs.readFileSync(path.join(base, 'style.css'), 'utf8');
+const runtimeVersion = js.match(/const PLUGIN_VERSION = '([^']+)'/)?.[1];
+const cssVersions = [...css.matchAll(/--pj-stylesheet-version\s*:\s*["']([^"']+)["']/g)].map(m => m[1]);
+assert.equal(runtimeVersion, manifest.version, '脚本与 manifest 版本必须一致');
+assert.ok(cssVersions.length > 0, 'CSS 必须有可检测的版本标记');
+for (const version of cssVersions) assert.equal(version, runtimeVersion, 'CSS 内部标记必须与运行脚本一致');
+assert.equal(manifest.js, `index.js?v=${manifest.version}`);
+assert.equal(manifest.css, `style.css?v=${manifest.version}`);
+console.log(`PASS version consistency: manifest / JS / CSS / cache stamps = ${manifest.version}`);
