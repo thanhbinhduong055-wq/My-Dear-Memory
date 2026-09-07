@@ -4,9 +4,9 @@
   "requires": [],
   "optional": [],
   "dependencies": [],
-  "js": "index.js?v=0.23.2",
-  "css": "style.css?v=0.23.2",
+  "js": "index.js?v=0.23.3",
+  "css": "style.css?v=0.23.3",
   "author": "Codex",
-  "version": "0.23.2",
+  "version": "0.23.3",
   "auto_update": true
 }

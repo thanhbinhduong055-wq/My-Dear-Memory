@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.23.2';
+const PLUGIN_VERSION = '0.23.3';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -141,6 +141,8 @@ let mobilePan = { x: 0, y: 0 };
 let lastStatus = '等待正文';
 let calendarMonthCursor = localMonthKey(new Date());
 let selectedCalendarDate = localDateKey(new Date());
+let calendarDateSelectionKey = '';
+let calendarDateManuallySelected = false;
 let mailDraft = { kind: 'card', body: '' };
 let mailCheckTimer = null;
 const mailDeliveryLocks = new Set();
@@ -997,6 +999,36 @@ function updateMailClock(book) {
   }
 }
 
+function syncCalendarDateWithStory(book) {
+  const key = storageKey();
+  if (calendarDateSelectionKey !== key) {
+    calendarDateSelectionKey = key;
+    calendarDateManuallySelected = false;
+    selectedCalendarDate = localDateKey(new Date());
+    calendarMonthCursor = selectedCalendarDate.slice(0, 7);
+  }
+  if (!calendarDateManuallySelected && validMailDate(book?.mailClock?.date)) {
+    selectedCalendarDate = book.mailClock.date;
+    calendarMonthCursor = selectedCalendarDate.slice(0, 7);
+  }
+}
+
+function mailDateWarning(date, storyDate) {
+  if (!validMailDate(storyDate)) return '尚未识别故事年月日；预约不会按现实时间触发，请先核对故事日期。';
+  if (validMailDate(date) && date.slice(0, 4) !== storyDate.slice(0, 4)) {
+    return `请核对年份：当前故事日期为 ${storyDate}，预约日期为 ${date}。只有故事到达或超过预约日期才会寄出。`;
+  }
+  return '';
+}
+
+function formatMailMessage(mail) {
+  const kind = mail.kind === 'letter' ? '情书' : '贺卡';
+  // Keep the original letter in the mailbox. Escape only the chat transport:
+  // user text must never close the HTML comment or render embedded markup.
+  const payload = escapeHtml(`私语手札信件投递\n寄件人：${mail.sender}\n收件人：${mail.recipient}\n预约故事日期：${mail.date}\n信件类型：${kind}\n\n信件正文：\n${mail.body}\n\n这封信已由 User 寄出。请在接下来的正文中自然呈现收信与回应，保持角色人设和当前剧情；不要照搬寄送信息表或 Request 标记。信件中的 HTML 实体表示原文字符。`).replace(/--/g, '&#45;&#45;');
+  return `✉ ${mail.kind === 'letter' ? '一封情书' : '一张贺卡'}已寄出。\n\n<!-- Request: ${payload}\n-->`;
+}
+
 async function deliverScheduledMail(book, mail) {
   if (!book || !mail || mail.status !== 'pending') return false;
   const key = storageKey();
@@ -1013,7 +1045,7 @@ async function deliverScheduledMail(book, mail) {
     let message = context.chat.find(item => item.extra?.privateJournalMailId === mail.id);
     if (!message) {
       message = { name: mail.sender, is_user: true, is_system: false, send_date: context.humanizedDateTime?.() || new Date().toISOString(),
-        mes: `【私语手札 · ${mail.kind === 'letter' ? '情书' : '贺卡'}】\n寄件人：${mail.sender}\n收件人：${mail.recipient}\n预约故事日期：${mail.date}\n\n${mail.body}\n\n（这封信已寄出，请在接下来的故事中自然呈现收信与回应。）`,
+        mes: formatMailMessage(mail),
         extra: { privateJournalMailId: mail.id } };
       context.chat.push(message);
       context.addOneMessage(message);
@@ -1026,7 +1058,7 @@ async function deliverScheduledMail(book, mail) {
     await saveSpecificBook(book, key);
     if (book === currentBook && key === storageKey()) {
       render();
-      setStatus('信已寄入正文聊天；下一轮回复可以读到');
+      setStatus('信已寄出，正文内容已隐藏；下一轮回复可以读到');
     }
     return true;
   } catch (error) {
@@ -1047,6 +1079,7 @@ async function checkScheduledMail() {
   const key = storageKey();
   const previousClock = JSON.stringify(book.mailClock);
   const date = updateMailClock(book);
+  syncCalendarDateWithStory(book);
   if (previousClock !== JSON.stringify(book.mailClock)) {
     if (book.scheduledMail?.length) await saveSpecificBook(book, key);
     if (book === currentBook && ['calendar', 'mail'].includes(activeType)) render();
@@ -3078,7 +3111,7 @@ function pagesForType(book, type) {
 
 function renderCalendar() {
   const model = calendarMonthModel(calendarMonthCursor, currentBook?.calendar);
-  const today = localDateKey(new Date());
+  const today = currentBook?.mailClock?.date || localDateKey(new Date());
   const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
   const cells = model.cells.map(cell => {
     if (!cell.dateKey) return '<span class="pj-calendar-day is-empty" aria-hidden="true"></span>';
@@ -3103,16 +3136,18 @@ function renderMailComposer() {
   const clock = currentBook?.mailClock?.date || '';
   return `<section class="pj-mail" aria-label="日历信箱">
     <h3>日历信箱 · 寄给未来的你</h3>
-    <p>按故事日期寄送。信件会出现在当前聊天中，下一轮正文可回应信件；寄出本身不调用模型。</p>
+    <p>按故事日期寄送。聊天只显示简短寄送提示，信件正文放在隐藏的 Request 注释中，供下一轮正文回应；寄出本身不调用模型。</p>
     <p class="pj-mail-clock">${clock ? `当前故事日期：${escapeHtml(clock)}` : '尚未识别完整故事日期，请在正文写明年月日。也可选择立即寄出。'}</p>
     <label>预约寄送日期<input type="date" data-mail-date value="${escapeHtml(selectedCalendarDate)}"></label>
+    ${validMailDate(clock) ? '<button type="button" class="pj-text-button" data-action="mail-story-date">使用故事当天</button>' : ''}
+    ${mailDateWarning(selectedCalendarDate, clock) ? `<p role="status" data-mail-date-warning>${escapeHtml(mailDateWarning(selectedCalendarDate, clock))}</p>` : ''}
     <label>信件类型<select data-mail-kind><option value="card" ${mailDraft.kind === 'card' ? 'selected' : ''}>贺卡</option><option value="letter" ${mailDraft.kind === 'letter' ? 'selected' : ''}>情书</option></select></label>
     <label>从已保存情书填入<select data-mail-import ${letters.length ? '' : 'disabled'}><option value="">${letters.length ? '选择一封情书…' : '先在情书栏目生成或保存一封情书'}</option>${letters.map(page => `<option value="${escapeHtml(page.id)}">${escapeHtml(page.title)} · ${escapeHtml(page.dateLabel)}</option>`).join('')}</select></label>
     <label>写给 ${escapeHtml(identity().characterName)}<textarea data-mail-body maxlength="12000" rows="6" placeholder="想在那一天对你说…">${escapeHtml(mailDraft.body)}</textarea></label>
     <div class="pj-mail-actions"><button type="button" class="pj-primary" data-action="mail-schedule">封好，预约寄送</button><button type="button" class="pj-secondary" data-action="mail-now">立即寄出</button></div>
     <p>到达或跨过所选日期时，在本轮正文结束后寄出。关闭酒馆期间不会运行；重新打开聊天后会检查到期信件。</p>
     <h4>${activeType === 'mail' ? '全部信件' : '当天信件'} · ${items.length} 封</h4>
-    <div class="pj-mail-list">${items.map(mail => `<details ${mail.status === 'pending' ? 'open' : ''}><summary>${mail.kind === 'letter' ? '情书' : '贺卡'} · ${{ pending: '待寄出', sent: '已寄出', cancelled: '已取消' }[mail.status]}</summary><p>${escapeHtml(mail.date)} · ${escapeHtml(mail.sender)} → ${escapeHtml(mail.recipient)}</p><div class="pj-mail-text">${escapeHtml(mail.body)}</div>${mail.status === 'sent' ? '<p>已进入当前聊天，下一轮角色回复可回应。</p>' : ''}${mail.error ? `<p role="alert">${escapeHtml(mail.error)}</p>` : ''}${mail.status === 'pending' ? `<div class="pj-mail-actions"><button type="button" data-mail-send="${escapeHtml(mail.id)}">${mail.error ? '重试寄送' : '现在寄出'}</button><button type="button" data-mail-cancel="${escapeHtml(mail.id)}">取消预约</button></div>` : ''}</details>`).join('') || '<p>还没有预约信件。</p>'}</div>
+    <div class="pj-mail-list">${items.map(mail => `<details ${mail.status === 'pending' ? 'open' : ''}><summary>${mail.kind === 'letter' ? '情书' : '贺卡'} · ${{ pending: '待寄出', sent: '已寄出', cancelled: '已取消' }[mail.status]}</summary><p>${escapeHtml(mail.date)} · ${escapeHtml(mail.sender)} → ${escapeHtml(mail.recipient)}</p>${mail.status === 'pending' && mailDateWarning(mail.date, clock) ? `<p role="status">${escapeHtml(mailDateWarning(mail.date, clock))}</p>` : ''}<div class="pj-mail-text">${escapeHtml(mail.body)}</div>${mail.status === 'sent' ? '<p>已进入当前聊天，下一轮角色回复可回应。</p>' : ''}${mail.error ? `<p role="alert">${escapeHtml(mail.error)}</p>` : ''}${mail.status === 'pending' ? `<div class="pj-mail-actions"><button type="button" data-mail-send="${escapeHtml(mail.id)}">${mail.error ? '重试寄送' : '现在寄出'}</button><button type="button" data-mail-cancel="${escapeHtml(mail.id)}">取消预约</button></div>` : ''}</details>`).join('') || '<p>还没有预约信件。</p>'}</div>
   </section>`;
 }
 
@@ -3198,7 +3233,7 @@ function renderControls() {
     const selectedEmoji = selectedEntry?.deleted ? '' : selectedEntry?.emoji;
     const emojiButtons = CALENDAR_EMOJIS.map(emoji => `<button type="button" class="${selectedEmoji === emoji ? 'active' : ''}" data-calendar-emoji="${escapeHtml(emoji)}" aria-label="把 ${escapeHtml(emoji)} 放到 ${escapeHtml(selectedCalendarDate)}" aria-pressed="${selectedEmoji === emoji}">${escapeHtml(emoji)}</button>`).join('');
     controls.innerHTML = `<div class="pj-calendar-controls">
-      <div class="pj-calendar-nav"><button type="button" data-action="calendar-prev" aria-label="上个月">‹</button><strong>${escapeHtml(model.label)}</strong><button type="button" data-action="calendar-next" aria-label="下个月">›</button><button type="button" class="pj-text-button" data-action="calendar-today">今天</button></div>
+      <div class="pj-calendar-nav"><button type="button" data-action="calendar-prev" aria-label="上个月">‹</button><strong>${escapeHtml(model.label)}</strong><button type="button" data-action="calendar-next" aria-label="下个月">›</button><button type="button" class="pj-text-button" data-action="calendar-today">${validMailDate(currentBook.mailClock?.date) ? '故事当天' : '现实今天'}</button></div>
       <div class="pj-calendar-picker"><span><small>正在标记</small><strong>${escapeHtml(selectedCalendarDate)}</strong></span><div class="pj-calendar-emojis" role="group" aria-label="选择心情 Emoji">${emojiButtons}</div><button type="button" class="pj-text-button" data-action="calendar-clear" ${selectedEmoji ? '' : 'disabled'}>清除</button></div>
     </div>`;
     return;
@@ -3259,6 +3294,7 @@ function renderApiRouter() {
 
 function render() {
   if (!root || !currentBook) return;
+  syncCalendarDateWithStory(currentBook);
   const id = identity();
   root.dataset.activeType = activeType;
   root.querySelector('.pj-title').textContent = `${id.userName} × ${id.characterName}`;
@@ -3343,7 +3379,12 @@ function bind() {
           if (action === 'mail-now') {
             if (!await deliverScheduledMail(currentBook, mail)) setStatus('信件已保存在待寄列表，请等待当前生成结束后重试');
           }
-          else { setStatus(`已预约 ${selectedCalendarDate} 寄出`); scheduleMailCheck(); }
+          else {
+            setStatus(`已预约 ${selectedCalendarDate} 寄出`);
+            const warning = mailDateWarning(selectedCalendarDate, currentBook.mailClock?.date);
+            if (warning) safeToastr('warning', warning);
+            scheduleMailCheck();
+          }
         }
         render();
       } catch (error) { safeToastr('error', error?.message || String(error)); }
@@ -3378,6 +3419,7 @@ function bind() {
       else if (activeType !== 'calendar') await generatePage({ type: activeType, source: 'manual' });
     }
     if (calendarDay) {
+      calendarDateManuallySelected = true;
       selectedCalendarDate = calendarDay;
       render();
     }
@@ -3387,12 +3429,14 @@ function bind() {
       setStatus(`${selectedCalendarDate} 已放入 ${calendarEmoji}`);
     }
     if (action === 'calendar-prev' || action === 'calendar-next') {
+      calendarDateManuallySelected = true;
       calendarMonthCursor = shiftCalendarMonth(calendarMonthCursor, action === 'calendar-prev' ? -1 : 1);
       selectedCalendarDate = `${calendarMonthCursor}-01`;
       render();
     }
-    if (action === 'calendar-today') {
-      selectedCalendarDate = localDateKey(new Date());
+    if (action === 'calendar-today' || action === 'mail-story-date') {
+      calendarDateManuallySelected = false;
+      selectedCalendarDate = currentBook?.mailClock?.date || localDateKey(new Date());
       calendarMonthCursor = selectedCalendarDate.slice(0, 7);
       render();
     }
@@ -3467,6 +3511,7 @@ function bind() {
     }
     if (event.target.matches('[data-mail-kind]')) mailDraft.kind = event.target.value;
     if (event.target.matches('[data-mail-date]') && validMailDate(event.target.value)) {
+      calendarDateManuallySelected = true;
       selectedCalendarDate = event.target.value;
       calendarMonthCursor = selectedCalendarDate.slice(0, 7);
       render();
@@ -4169,4 +4214,3 @@ if (document.readyState === 'loading') {
 } else startInitialization();
 
 })();
-

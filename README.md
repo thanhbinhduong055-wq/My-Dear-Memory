@@ -2,7 +2,7 @@
 
 一个运行于 SillyTavern 的纯前端 UI 扩展。它借助当前已配置的模型，把当前聊天、角色卡、User Persona 与本次生成实际激活的世界书内容，整理成一本按聊天独立保存的私人日志。
 
-当前修正版的使用入口、安装方式、截断补全次数和验证边界，见 [0.23.2 更新说明](更新说明-0.23.2.md)。
+当前修正版的信件隐藏显示、故事日期默认值与年份核对，见 [0.23.3 更新说明](更新说明-0.23.3.md)。之前的安装方式和截断补全说明见 [0.23.2 更新说明](更新说明-0.23.2.md)。
 
 轻量版默认使用系统字体，英文花体内置；中文 Noto 宋体与志莽行书在首次选择时联网加载。详见更新说明。
 
@@ -48,11 +48,11 @@
 3. 粘贴 Git 仓库 URL 并安装。
 4. 打开任意角色聊天，点击或拖动右下角酒红色 `❦` 按钮；也可以在魔法棒菜单，或“扩展”抽屉中点击“私语手札”。
 
-运行版本会显示在手札内页底部，例如 `v0.23.2`；浏览器控制台也会打印 `[Private Journal v0.23.2] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。`manifest.json` 中的 JS/CSS 路径也带有 `v=0.23.2` 缓存戳，避免手机继续读取旧版资源。
+运行版本会显示在手札内页底部，例如 `v0.23.3`；浏览器控制台也会打印 `[Private Journal v0.23.3] initialize:ready` 以及 SillyTavern 版本、站点 origin、IndexedDB/LocalForage 状态和当前扩展抽屉容器。`manifest.json` 中的 JS/CSS 路径也带有 `v=0.23.3` 缓存戳，避免手机继续读取旧版资源。
 
 本地开发时，也可把整个目录放入 SillyTavern 的 `data/<user-handle>/extensions/`，或安装为所有用户后放到 `public/scripts/extensions/third-party/` 对应目录。
 
-## 手机端排障（0.23.2）
+## 手机端排障（0.23.3）
 
 先在手机浏览器 Console 里跑这一行，它会直接给出 A–E 判定：
 
@@ -76,7 +76,7 @@ window.__stPrivateJournalRuntime.report()
 其他可用入口：
 
 ```js
-window.__stPrivateJournalRuntime.version        // 必须是 0.23.2，否则是缓存/安装问题
+window.__stPrivateJournalRuntime.version        // 必须是 0.23.3，否则是缓存/安装问题
 window.__stPrivateJournalRuntime.openJournal()  // 绕开所有入口直接打开
 window.__stPrivateJournalRuntime.probeOverlay() // computed style + rect + elementsFromPoint
 window.__stPrivateJournalRuntime.stylesheet()   // CSS 版本标记比对
@@ -123,4 +123,3 @@ window.__stPrivateJournalRuntime.trace()        // 跨实例生命周期账本
 ## 兼容性
 
 已针对 SillyTavern 1.18.0 的启动和入口生命周期进行验证。缺少 `SillyTavern.libs.localforage` 时仍可用临时会话打开；模型生成功能需要 `generateQuietPrompt()`，使用副 API 时最低要求为 1.15.0。建议使用最新稳定版。
-
