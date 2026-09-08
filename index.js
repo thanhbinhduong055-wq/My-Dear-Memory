@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.23.4';
+const PLUGIN_VERSION = '0.24.0';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -112,8 +112,6 @@ let currentBookStorageKey = null;
 let bookLoadRevision = 0;
 const bookWriteRevisions = new Map();
 let activeType = 'impression';
-let activeImpressionFocus = 'overall';
-let customImpressionRequest = '';
 let quoteDraft = '';
 let quoteSpeakerDraft = '';
 let pendingQuoteSelection = null;
@@ -214,26 +212,6 @@ const PAGE_TYPES = {
     empty: '还没有收起想一直记得的对白。',
     instruction: '这一栏只保存 User 亲手收录的对白，不调用模型生成。',
   },
-};
-
-const IMPRESSION_FOCUSES = {
-  overall: {
-    label: '整体印象',
-    prompt: '从外在感受、相处方式和内在判断三个层次形成整体印象；每一层都要引用不同的具体细节，并说明 User 的认识发生了什么变化。',
-  },
-  temperament: {
-    label: '气质外貌',
-    prompt: '只聚焦 Char 的神态、声音、动作习惯、穿着或空间中的存在感；至少写出三个可感知细节，并区分“第一眼看见的样子”和“相处后才察觉的气质”。不要把外貌自动等同于性格。',
-  },
-  personality: {
-    label: '性格细节',
-    prompt: '至少写出三个“触发情境→Char 的反应或选择→User 因此形成的判断”，覆盖价值观、边界、矛盾感或微小习惯中的不同角度。必须写出一处不那么完美却真实的复杂性；不要用外貌描写代替性格判断。',
-  },
-  attraction: {
-    label: '心动之处',
-    prompt: '至少写出三个令 User 在意或心动的具体瞬间，并分别解释它们触动了 User 的哪一种需要、记忆或软肋。不能只反复使用“温柔、特别、让人安心”等空泛结论，也不要擅自宣布双方已恋爱。',
-  },
-  custom: { label: '自定义', prompt: '严格围绕 User 输入的观察需求来写；使用至少三个不同证据角度，并明确这些细节如何改变 User 对 Char 的认识。' },
 };
 
 const THEMES = {
@@ -911,10 +889,15 @@ function mergeStoredBooks(...candidates) {
   const pages = [];
   const seen = new Set();
   for (const book of rankedBooks) {
-    for (const page of Array.isArray(book?.pages) ? book.pages : []) {
+    // Visit consolidated entries first. A stale replica may have picked a
+    // different canonical ID; globally excluding every alias could erase both.
+    const candidates = [...(Array.isArray(book?.pages) ? book.pages : [])]
+      .sort((a,b) => Number(Boolean(b.mergedPageIds?.length)) - Number(Boolean(a.mergedPageIds?.length)));
+    for (const page of candidates) {
       const key = storedPageKey(page);
       if (seen.has(key)) continue;
       seen.add(key);
+      for (const id of page.mergedPageIds || []) seen.add(`id:${id}`);
       pages.push(page);
     }
   }
@@ -1191,6 +1174,7 @@ function migrateBook(book) {
     delete repaired.hasRoundAccompaniment;
     return repaired;
   });
+  book.pages = coalesceStoredJournalPages(book.pages);
   const impressions = book.pages.filter(page => page.type === 'impression');
   if (impressions.length && !impressions.some(page => page.impressionStage === 'initial')) {
     const oldest = [...impressions].sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))[0];
@@ -1219,9 +1203,8 @@ function recentImpressionContext(book = currentBook) {
     .filter(page => page.type === 'impression' || page.type === 'first_impression')
     .slice(0, 4)
     .map(page => {
-      const angle = page.impressionFocusLabel || IMPRESSION_FOCUSES[page.impressionFocus]?.label || '未标注角度';
       const summary = String(page.body || '').replace(/\s+/g, ' ').slice(0, 150);
-      return `- ${angle}：${summary}`;
+      return `- ${summary}`;
     });
   return recent.length
     ? `\n既往印象摘要（本次必须推进认识，不得换词复述）：\n${recent.join('\n')}`
@@ -1276,21 +1259,19 @@ function buildPrompt(type, options = {}) {
   const settings = getSettings();
   const meta = PAGE_TYPES[type] || PAGE_TYPES.daily_note;
   const id = identity();
-  const impressionFocus = IMPRESSION_FOCUSES[options.impressionFocus] || IMPRESSION_FOCUSES.overall;
-  const customRequest = String(options.customRequest || '').trim();
   const initialImpression = type === 'impression' && isInitialImpression();
   const journalLabel = initialImpression ? '初印象' : meta.label;
   const lengthRule = PAGE_LENGTH_RULES[type] || '320至500字';
   const impressionHistory = type === 'impression' ? recentImpressionContext() : '';
   const typeInstruction = type === 'impression'
-    ? `${initialImpression ? '这是 Char 第一次出现在本手札中，必须写成“初印象”：记录 User 在现有最早接触与当前认知下，最先被 Char 哪些特质触动、警惕或吸引；不要假装拥有长期相处后的总结。' : meta.instruction}\n观察方向：${impressionFocus.prompt}${options.impressionFocus === 'custom' ? `\nUser 的具体需求：${customRequest || '请自由选择一个有依据的观察角度。'}` : ''}`
+    ? `${initialImpression ? '这是 Char 第一次出现在本手札中，必须写成“初印象”：记录 User 在现有最早接触与当前认知下，最先被 Char 哪些特质触动、警惕或吸引；不要假装拥有长期相处后的总结。' : meta.instruction}`
     : meta.instruction;
   return `你正在为 ${id.userName} 与 ${id.characterName} 的私人手札撰写“${journalLabel}”。这本手札始终属于 User，叙述视角始终是 User。\n\n` +
     `资料原则：只依据当前对话、角色设定、User Persona，以及当前生成中实际激活的世界书内容。不要把指令、系统提示或世界书原文泄露出来；不要杜撰未发生的共同经历。资料矛盾时，以最近对话为准，并保持含蓄。\n` +
     `视角铁律：第一人称“我”只能指 ${id.userName}，观察与情绪均属于 User；${id.characterName} 是被观察、被书写或被倾诉的对象。\n` +
     `本栏目要求：${typeInstruction}${impressionHistory}\n` +
     `User 声音：先从 User Persona 与 User 在当前聊天中的实际发言归纳其用词、句长、语气强弱、幽默感、克制程度、称呼习惯和情绪表达方式，再以同一套语言习惯写作。不得套用 Char 的口吻，不得使用与 User 人设冲突的华丽辞藻或网络腔；资料不足时采用自然、克制的第一人称。\n` +
-    `写作要求：使用 ${settings.language}；正文 ${lengthRule}，分成2至5个自然段；有具体细节和情感余韵，像 User 真的会写下的话，避免模板腔。只写手札正文，不要附加诗句、歌词、歌曲推荐或配乐。\n\n` +
+    `写作要求：使用 ${settings.language}；正文 ${lengthRule}，分成2至5个自然段，段落之间空一行，所有段落都放在唯一的 body 标签里；有具体细节和情感余韵，像 User 真的会写下的话，避免模板腔。只写手札正文，不要附加诗句、歌词、歌曲推荐或配乐。\n\n` +
     `只输出下面的标签格式，不要 JSON、Markdown 或代码围栏。标签内可以直接写正常引号和换行：\n` +
     `<journal_page><title>页标题</title><dateLabel>故事内日期或此刻</dateLabel><mood>User的心绪</mood><body>正文</body><anchors><item>依据1</item><item>依据2</item></anchors><confidence>high|medium|low</confidence></journal_page>`;
 }
@@ -1427,6 +1408,125 @@ function repairStoredPage(page) {
   }
 }
 
+// One entry per module and story day; real-world save time is never a day key.
+function prepareJournalBody(value) {
+  const text = String(value || '').replace(/\r\n?/g, '\n').trim();
+  if (text.includes('\n')) return text.split(/\n+/).map(part => part.trim()).filter(Boolean).join('\n\n');
+  if (text.length < 180) return text;
+  const boundaries = [...text.matchAll(/[。！？!?]+[”’」』"]*(?:\s+|(?=[^。！？!?”’」』"]))/gu)].map(match => match.index + match[0].length);
+  const cuts = boundaries.filter(index => index < text.length);
+  if (!cuts.length) return text;
+  const target = text.length / Math.min(3, cuts.length + 1);
+  const parts = [];
+  let start = 0;
+  for (const end of cuts) {
+    if (end - start < target || text.length - end < target / 2 || parts.length >= 2) continue;
+    parts.push(text.slice(start, end)); start = end;
+  }
+  if (!parts.length && cuts.length) { const end = cuts.reduce((a,b) => Math.abs(b-text.length/2)<Math.abs(a-text.length/2)?b:a); parts.push(text.slice(0,end)); start=end; }
+  return [...parts, text.slice(start)].join('\n\n');
+}
+
+function joinJournalParagraphs(first, second) {
+  const body = String(first || '');
+  const additions = String(second || '').split(/\n\s*\n/).filter(part => part.trim());
+  const seen = new Set(body.split(/\n\s*\n/).map(part => part.trim()));
+  const fresh = additions.filter(part => { const key = part.trim(); if (seen.has(key)) return false; seen.add(key); return true; });
+  return [body, ...fresh].filter(Boolean).join('\n\n');
+}
+
+function combineJournalPages(first, next) {
+  const merged = { ...first, body: joinJournalParagraphs(first.body, next.body), incomplete: Boolean(first.incomplete || next.incomplete) };
+  merged.memoryAnchors = [...new Set([...(first.memoryAnchors || []), ...(next.memoryAnchors || [])])];
+  merged.stickers = [...new Map([...(first.stickers || []), ...(next.stickers || [])].map(item => [item.id, item])).values()];
+  merged.emojis = [...new Set([...(first.emojis || []), ...(next.emojis || [])])];
+  merged.mergedPageIds = [...new Set([...(first.mergedPageIds || []), ...(next.mergedPageIds || []), next.id].filter(id => id && id !== first.id))];
+  if (next.impressionStage === 'initial') merged.impressionStage = 'initial';
+  return merged;
+}
+
+function coalesceBatchUpdates(updates) {
+  const groups = new Map();
+  for (const { type, page } of updates) {
+    page.body = prepareJournalBody(page.body);
+    const previous = groups.get(type);
+    groups.set(type, previous ? { type, page: combineJournalPages(previous.page, page) } : { type, page });
+  }
+  return [...groups.values()];
+}
+
+function storedJournalDayKey(page) {
+  if (!['impression', 'daily_note', 'love_letter', 'romance_diary'].includes(page?.type)) return '';
+  if (page.storyDayKey) return page.storyDayKey;
+  const period = page.storyPeriod;
+  if (period?.fromKey) return period.isExtended ? `range:${period.fromKey}:${period.toKey || period.label}` : period.fromKey;
+  // Only unambiguous story dates qualify. Never collapse all legacy “此刻” pages.
+  const date = /^(\d{4})[年/.-](\d{1,2})[月/.-](\d{1,2})日?$/.exec(String(page.dateLabel || '').trim());
+  return date ? `date:${date[1]}-${date[2].padStart(2,'0')}-${date[3].padStart(2,'0')}` : '';
+}
+
+function coalesceStoredJournalPages(pages) {
+  const groups = new Map(), result = [];
+  for (const original of [...pages].sort((a,b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))) {
+    const day = storedJournalDayKey(original);
+    const page = day ? { ...original, storyDayKey: day, body: prepareJournalBody(original.body) } : original;
+    const key = day ? `${page.type}:${day}` : '';
+    if (key && groups.has(key)) {
+      const index = groups.get(key); result[index] = combineJournalPages(result[index], page);
+    } else { if (key) groups.set(key, result.length); result.push(page); }
+  }
+  return result.sort((a,b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+}
+
+function journalDayKey(book, period = null) {
+  const date = updateMailClock(book);
+  if (period?.isExtended) return `range:${period.fromKey}:${period.toKey || period.label}`;
+  if (period?.fromKey?.startsWith('date:')) return period.fromKey;
+  if (date) {
+    const value = new Date(`${date}T00:00:00Z`);
+    if (period) value.setUTCDate(value.getUTCDate() - (period.spanDays || 1));
+    return `date:${value.toISOString().slice(0,10)}`;
+  }
+  if (period?.fromKey) return period.fromKey;
+  // Manual-only users may have no absolute date and no auto timeline yet.
+  // Replaying relative days keeps “第二天” separate even with auto capture off.
+  const info = latestStoryExchangeInfo();
+  let key = 'story-day:0', sequence = 0, observed = false;
+  const userParts = [];
+  for (let index = 0; info && index <= info.index; index += 1) {
+    const message = ctx().chat[index];
+    if (message?.is_system || message?.extra?.privateJournalMailId) continue;
+    const text = visibleMessageContent(message);
+    if (message?.is_user) { userParts.push(text); continue; }
+    const marker = detectStoryDayMarker([...userParts, text].join('\n\n'));
+    userParts.length = 0;
+    if (marker?.type === 'absolute') key = marker.key;
+    else if (observed && marker?.type === 'relative') { sequence += marker.spanDays || 1; key = `story-day:${sequence}`; }
+    observed = true;
+  }
+  return key;
+}
+
+function existingDayPrompt(book, type, day) {
+  const previous = book.pages.find(page => page.type === type && storedJournalDayKey(page) === day);
+  return previous ? `\n同一故事日的“${PAGE_TYPES[type].label}”已经有以下文字。只补充尚未记录的新内容，不重写或复述，仍以完整自然段输出：\n<existing_entry>\n${previous.body}\n</existing_entry>\n` : '';
+}
+
+function storeJournalPage(book, page, day) {
+  page.storyDayKey = day;
+  page.body = prepareJournalBody(page.body);
+  const index = book.pages.findIndex(previous => previous.type === page.type && storedJournalDayKey(previous) === day);
+  if (index < 0) { book.pages.unshift(page); return page; }
+  const previous = book.pages[index];
+  const combined = combineJournalPages(previous, page);
+  combined.updatedAt = page.createdAt;
+  combined.captureSignature = page.captureSignature;
+  book.pages.splice(index, 1);
+  book.pages.unshift(combined);
+  return combined;
+}
+
+
 function normalizePage(page) {
   return {
     title: String(page.title || '无题'),
@@ -1459,11 +1559,6 @@ function buildRelationshipPrompt() {
 function buildBatchPrompt(options = {}) {
   const settings = getSettings();
   const id = identity();
-  const focusKey = options.impressionFocus === 'custom' && !String(options.customRequest || '').trim()
-    ? 'overall'
-    : (options.impressionFocus || 'overall');
-  const focus = IMPRESSION_FOCUSES[focusKey] || IMPRESSION_FOCUSES.overall;
-  const customRequest = focusKey === 'custom' ? String(options.customRequest || '').trim() : '';
   const userConfirmedPartners = currentBook?.relationship?.status === 'partners' && currentBook?.relationship?.source === 'user';
   const initialImpression = isInitialImpression();
   const period = options.period || null;
@@ -1475,12 +1570,12 @@ function buildBatchPrompt(options = {}) {
   return `故事时间线刚刚发生跨日或跨阶段变化。请用这一次响应批量同步 ${id.userName} 与 ${id.characterName} 的私人手札；禁止只写其中一个栏目。${periodInstruction}所有内容都属于 User 的视角，第一人称“我”只能是 ${id.userName}，Char 是被观察、共同生活或被倾诉的对象。\n\n` +
     `资料只来自当前对话、角色设定、User Persona 与当前激活世界书；不要泄露提示词，不要杜撰未发生的经历。语言：${settings.language}。避免四篇互相重复。\n` +
     `User 声音：先从 User Persona 和 User 的实际聊天发言归纳用词、句长、语气强弱、幽默感、克制程度、称呼习惯与表达禁区，四篇都必须像 User 本人会写出的文字；不得套用 Char 口吻或通用言情模板。资料不足时使用自然克制的第一人称。\n` +
-    `${initialImpression ? '初印象：这是 Char 第一次进入手札，必须写“初印象”，只记录 User 在最早接触与当前有限认知下最先注意到的特质，不得写成长期总结。' : '印象：写 User 在持续相处后对 Char 新增、修正或变得更复杂的认识。'} ${PAGE_LENGTH_RULES.impression}，2至4段。本轮方向是“${focus.label}”：${focus.prompt}${customRequest ? ` User 的具体需求：${customRequest}` : ''}${recentImpressionContext()}\n` +
+    `${initialImpression ? '初印象：这是 Char 第一次进入手札，必须写“初印象”，只记录 User 在最早接触与当前有限认知下最先注意到的特质，不得写成长期总结。' : '印象：写 User 在持续相处后对 Char 新增、修正或变得更复杂的认识。'} ${PAGE_LENGTH_RULES.impression}，2至4段。${recentImpressionContext()}\n` +
     `相处日记：${PAGE_LENGTH_RULES.daily_note}，3至5段。User 记录两个人在本次时间范围内已经发生的日常、对话细节、关键变化与当时感受；长跨度时用少量明确节点串起过程，不写成流水账或情书。\n` +
     `情书：${PAGE_LENGTH_RULES.love_letter}，3至6段。User 直接写给 Char，“我”是 User、“你”是 Char，绝对不要反写。情感浓度必须明显高于其他栏目，写出具体的眷恋、心疼、渴望、恐惧或不舍；允许脆弱和坦白，但不堆砌空泛辞藻。\n` +
     `关系判定：只有已明确确认恋爱、情侣、伴侣或配偶关系才是 partners；暧昧、调情、单恋和角色卡倾向都不算。${userConfirmedPartners ? 'User 已手动确认双方是伴侣，relationship.status 必须保持 partners。' : ''}\n` +
     `恋爱日记：${PAGE_LENGTH_RULES.romance_diary}，3至6段。仅当 relationship.status 为 partners 时生成；否则 save 必须为 false。正文至少三分之二描写 User 的内心情感、依恋、亲密需求与关系变化，事件叙述最多占三分之一。四个栏目都只写手札正文，不要附加诗句、歌词、歌曲推荐或配乐。\n\n` +
-    `只输出下列标签协议，不要 JSON、Markdown 或代码围栏。标签内可以直接写引号和换行。必须按顺序完整输出 impression、daily_note、love_letter、relationship、romance_diary。请为最后的恋爱日记预留完整篇幅；每篇都应以完整句子收尾，并闭合 body、page 与 journal_batch 标签。不得写“同上”“使用相同标签”等省略语。${period?.isExtended ? '若时间范围内存在数个上下文明示的阶段，可为同一 type 输出最多3个 page，按时间先后分别保存；否则每类只输出1页。' : '本轮每类只输出1页。'}只有伴侣关系成立时才填写 romance_diary：\n` +
+    `只输出下列标签协议，不要 JSON、Markdown 或代码围栏。标签内可以直接写引号和换行。必须按顺序完整输出 impression、daily_note、love_letter、relationship、romance_diary。请为最后的恋爱日记预留完整篇幅；每篇都应以完整句子收尾，并闭合 body、page 与 journal_batch 标签。不得写“同上”“使用相同标签”等省略语。每个栏目只能输出一个 page；无论跨度多久，都把该栏目的全部自然段放入同一个 body，以空行分段，不能把每段拆成独立 page。只有伴侣关系成立时才填写 romance_diary：\n` +
     `<journal_batch>${pageTemplate('impression')}${pageTemplate('daily_note')}${pageTemplate('love_letter')}` +
     `<relationship><status>partners|not_partners|uncertain</status><reason>简短说明</reason><evidence><item>依据</item></evidence></relationship>` +
     `${pageTemplate('romance_diary', userConfirmedPartners ? 'true' : 'true或false')}</journal_batch>`;
@@ -1523,16 +1618,13 @@ function parseBatch(raw) {
     ? payload.updates
     : Object.entries(payload.updates || {}).map(([type, value]) => ({ type, ...(value || {}) }));
   const allowedTypes = new Set(['impression', 'daily_note', 'love_letter', 'romance_diary']);
-  const typeCounts = new Map();
   const updates = rawUpdates
     .filter(item => {
-      const count = typeCounts.get(item?.type) || 0;
-      if (!item || !allowedTypes.has(item.type) || item.shouldSave === false || !item.page || count >= 3) return false;
-      typeCounts.set(item.type, count + 1);
+      if (!item || !allowedTypes.has(item.type) || item.shouldSave === false || !item.page) return false;
       return true;
     })
     .map(item => ({ type: item.type, page: normalizePage(item.page) }));
-  return { relationship: payload.relationship ? normalizeRelationship(payload.relationship) : null, updates };
+  return { relationship: payload.relationship ? normalizeRelationship(payload.relationship) : null, updates: coalesceBatchUpdates(updates) };
 }
 
 function parseTaggedBatch(text) {
@@ -1546,23 +1638,20 @@ function parseTaggedBatch(text) {
   const source = String(text || '');
   const starts = [...source.matchAll(/<page\b([^>]*)>/gi)];
   const updates = [];
-  const typeCounts = new Map();
   for (let index = 0; index < starts.length; index += 1) {
     const match = starts[index];
     const attrs = match[1] || '';
     const type = /\btype\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
     const saveValue = /\bsave\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1]?.toLowerCase();
-    const count = typeCounts.get(type) || 0;
-    if (!['impression', 'daily_note', 'love_letter', 'romance_diary'].includes(type) || saveValue === 'false' || count >= 3) continue;
+    if (!['impression', 'daily_note', 'love_letter', 'romance_diary'].includes(type) || saveValue === 'false') continue;
     const contentStart = match.index + match[0].length;
     const contentEnd = starts[index + 1]?.index ?? source.indexOf('</journal_batch>', contentStart);
     const rawBlock = source.slice(contentStart, contentEnd >= 0 ? contentEnd : source.length).replace(/<\/page>\s*$/i, '');
     const page = parseTaggedPage(`<page>${rawBlock}</page>`);
     if (!page) continue;
-    typeCounts.set(type, count + 1);
     updates.push({ type, page });
   }
-  return { relationship, updates };
+  return { relationship, updates: coalesceBatchUpdates(updates) };
 }
 
 function isRomanceUnlocked() {
@@ -2418,10 +2507,6 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     if (source === 'manual') toastr.warning('请先判定或确认双方已经是伴侣。', '私语手札');
     return;
   }
-  if (type === 'impression' && activeImpressionFocus === 'custom' && !customImpressionRequest.trim()) {
-    toastr.warning('请先写下你希望观察 Char 的哪个方面。', '私语手札');
-    return;
-  }
   if (journalGenerationActive) {
     if (source === 'manual') toastr.info('已有一页正在生成。', '私语手札');
     return;
@@ -2439,15 +2524,13 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
   const signature = captureSignature || latestAssistantSignature();
   if (source === 'auto' && signature && targetBook?.lastCapturedSignature === signature) return;
 
+  const day = journalDayKey(targetBook);
   journalGenerationActive = true;
   setGeneratingUi(true);
   const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
   setStatus(source === 'auto' ? `正文完成，正在用${apiLabel}生成手札…` : `正在调用${apiLabel}…`);
   try {
-    const generationOptions = type === 'impression'
-      ? { impressionFocus: activeImpressionFocus, customRequest: customImpressionRequest }
-      : {};
-    const result = await requestCompleteJournal(buildPrompt(type, generationOptions), 5200);
+    const result = await requestCompleteJournal(buildPrompt(type) + existingDayPrompt(targetBook, type, day), 5200);
     const page = parseJson(result.text, type);
     page.incomplete ||= result.incomplete;
     page.id = createId();
@@ -2457,18 +2540,15 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     page.captureSignature = signature;
     if (type === 'impression') {
       page.impressionStage = isInitialImpression(targetBook) ? 'initial' : 'evolving';
-      page.impressionFocus = activeImpressionFocus;
-      page.impressionFocusLabel = activeImpressionFocus === 'custom'
-        ? customImpressionRequest.trim()
-        : IMPRESSION_FOCUSES[activeImpressionFocus]?.label;
+
     }
-    targetBook.pages.unshift(page);
+    storeJournalPage(targetBook, page, day);
     if (signature) targetBook.lastCapturedSignature = signature;
     await saveSpecificBook(targetBook, targetStorageKey);
     if (currentBook === targetBook) render();
-    setStatus(page.incomplete ? '响应未写完，已保留收到的文字' : '本页已写入');
+    setStatus(page.incomplete ? '响应未写完，已保留收到的文字' : '已更新当天这一页');
     if (page.incomplete) safeToastr('warning', '本页响应提前结束，已标注并保留文字。可编辑补全或手动重新生成。');
-    else toastr.success('新的一页已经写好。', '私语手札');
+    else toastr.success('已写入当天这一页。', '私语手札');
   } catch (error) {
     console.error('[Private Journal]', error);
     const message = error?.message || String(error);
@@ -2496,16 +2576,14 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
   const signature = captureSignature || latestAssistantSignature();
   if (signature && targetBook?.lastCapturedSignature === signature) return false;
 
-  const focusKey = activeImpressionFocus === 'custom' && !customImpressionRequest.trim()
-    ? 'overall'
-    : activeImpressionFocus;
-  const batchOptions = { impressionFocus: focusKey, customRequest: customImpressionRequest, period };
+  const batchOptions = { period };
+  const day = journalDayKey(targetBook, period);
   journalGenerationActive = true;
   setGeneratingUi(true);
   const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
   setStatus(`正文完成，正在用一次${apiLabel}同步全部手札…`);
   try {
-    const result = await requestCompleteJournal(buildBatchPrompt(batchOptions), batchOutputBudget(batchOptions));
+    const result = await requestCompleteJournal(buildBatchPrompt(batchOptions) + ['impression','daily_note','love_letter','romance_diary'].map(type => existingDayPrompt(targetBook, type, day)).join(''), batchOutputBudget(batchOptions));
     const batch = parseBatch(result.text);
     const manualRelationship = targetBook.relationship?.source === 'user' && targetBook.relationship?.status === 'partners';
     if (!manualRelationship && batch.relationship) targetBook.relationship = batch.relationship;
@@ -2535,12 +2613,9 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
       if (item.type === 'impression') {
         page.impressionStage = initialImpression && impressionIndex === 0 ? 'initial' : 'evolving';
         impressionIndex += 1;
-        page.impressionFocus = focusKey;
-        page.impressionFocusLabel = focusKey === 'custom'
-          ? customImpressionRequest.trim()
-          : IMPRESSION_FOCUSES[focusKey]?.label;
+
       }
-      targetBook.pages.unshift(page);
+      storeJournalPage(targetBook, page, day);
     }
     if (targetBook.timeline?.currentDayKey) targetBook.timeline.lastUpdatedDayKey = targetBook.timeline.currentDayKey;
     if (signature) targetBook.lastCapturedSignature = signature;
@@ -3129,6 +3204,76 @@ function renderCalendar() {
   </section>`;
 }
 
+let mailAnimation = null;
+let mailAnimationRevision = 0;
+let mailActionActive = false;
+
+function closeMailAnimation({ restoreFocus = true } = {}) {
+  mailAnimationRevision += 1;
+  const animation = mailAnimation;
+  mailAnimation = null;
+  if (!animation) return;
+  animation.timers.forEach(clearTimeout);
+  animation.motion?.removeEventListener?.('change', animation.onMotionChange);
+  animation.dialog.close?.();
+  animation.dialog.remove();
+  if (restoreFocus && animation.focus?.isConnected) animation.focus.focus?.({ preventScroll: true });
+}
+
+async function playMailAnimation(mail, outcome = 'preview') {
+  closeMailAnimation({ restoreFocus: false });
+  const revision = mailAnimationRevision, key = storageKey();
+  const theme = THEMES[getSettings().theme] ? getSettings().theme : DEFAULTS.theme;
+  const asset = extensionAssetUrl(`./assets/mail/${theme}.webp`);
+  const preload = new Image(); preload.src = asset;
+  // A missing decoration must not block the already completed mail operation.
+  await Promise.race([preload.decode?.().catch(() => {}), new Promise(resolve => setTimeout(resolve, 1200))]);
+  if (revision !== mailAnimationRevision || key !== storageKey() || !root?.classList.contains('open')) return;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'pj-mail-animation';
+  dialog.dataset.theme = theme;
+  dialog.setAttribute('aria-labelledby', 'pj-mail-animation-title');
+  dialog.style.setProperty('--pj-mail-art', `url("${asset}")`);
+  dialog.style.setProperty('--pj-mail-font', FONTS[getSettings().font]?.family || FONTS.system_song.family);
+  dialog.innerHTML = `<header><div><small>私语手札 · ${escapeHtml(THEMES[theme].label)}</small><h2 id="pj-mail-animation-title">把心意装进信封</h2></div><button type="button" data-mail-animation-close aria-label="跳过并关闭寄信动画">跳过</button></header>
+    <div class="pj-mail-stage" data-phase="writing" aria-hidden="true">
+      <div class="pj-mail-envelope-base"></div>
+      <div class="pj-mail-paper"><div class="pj-mail-paper-turn"><div class="pj-mail-paper-front"><div class="pj-mail-ink"></div></div><div class="pj-mail-paper-back"></div></div></div>
+      <div class="pj-mail-envelope-face"></div><div class="pj-mail-envelope-flap"></div>
+    </div>
+    <p class="pj-mail-animation-step" role="status" aria-live="polite">字句落在纸上</p>
+    <p class="pj-mail-animation-result"></p>`;
+  dialog.querySelector('.pj-mail-ink').textContent = mail.body;
+  const updateResult = () => {
+    const sent = outcome !== 'preview' && (outcome === 'sent' || mail.status === 'sent');
+    dialog.querySelector('.pj-mail-animation-result').textContent = sent ? '已寄出 · 下一轮角色回复可以回应这封信' : outcome === 'scheduled' ? `已预约 ${mail.date} · 可在信箱取消或立即寄出` : '封信预览 · 这一步不会寄出信件';
+  };
+  updateResult();
+  const focus = document.activeElement;
+  document.body.append(dialog);
+  const motion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const stage = dialog.querySelector('.pj-mail-stage');
+  const finish = () => {
+    updateResult();
+    stage.dataset.phase = 'sealed';
+    dialog.querySelector('.pj-mail-animation-step').textContent = '心意已封好';
+    const close = dialog.querySelector('[data-mail-animation-close]'); close.textContent = '完成'; close.setAttribute('aria-label', '关闭寄信动画');
+  };
+  const onMotionChange = event => { if (event.matches) { mailAnimation?.timers.forEach(clearTimeout); finish(); } };
+  mailAnimation = { dialog, focus, timers: [], motion, onMotionChange };
+  motion?.addEventListener?.('change', onMotionChange);
+  dialog.querySelector('[data-mail-animation-close]').addEventListener('click', () => closeMailAnimation());
+  dialog.addEventListener('cancel', event => { event.preventDefault(); closeMailAnimation(); });
+  dialog.showModal();
+  dialog.querySelector('[data-mail-animation-close]').focus({ preventScroll: true });
+  if (motion?.matches) { finish(); return; }
+  for (const [delay, phase, label] of [[1900,'flipping','翻到花纹的背面'],[3300,'opening','打开信封'],[4300,'inserting','轻轻装入信封'],[5700,'closing','合上信封']]) {
+    mailAnimation.timers.push(setTimeout(() => { stage.dataset.phase = phase; dialog.querySelector('.pj-mail-animation-step').textContent = label; }, delay));
+  }
+  mailAnimation.timers.push(setTimeout(finish, 6600));
+}
+
+
 function renderMailComposer() {
   const allMail = normalizeScheduledMail(currentBook?.scheduledMail);
   const items = activeType === 'mail' ? allMail : allMail.filter(mail => mail.date === selectedCalendarDate);
@@ -3144,10 +3289,10 @@ function renderMailComposer() {
     <label>信件类型<select data-mail-kind><option value="card" ${mailDraft.kind === 'card' ? 'selected' : ''}>贺卡</option><option value="letter" ${mailDraft.kind === 'letter' ? 'selected' : ''}>情书</option></select></label>
     <label>从已保存情书填入<select data-mail-import ${letters.length ? '' : 'disabled'}><option value="">${letters.length ? '选择一封情书…' : '先在情书栏目生成或保存一封情书'}</option>${letters.map(page => `<option value="${escapeHtml(page.id)}">${escapeHtml(page.title)} · ${escapeHtml(page.dateLabel)}</option>`).join('')}</select></label>
     <label>写给 ${escapeHtml(identity().characterName)}<textarea data-mail-body maxlength="12000" rows="6" placeholder="想在那一天对你说…">${escapeHtml(mailDraft.body)}</textarea></label>
-    <div class="pj-mail-actions"><button type="button" class="pj-primary" data-action="mail-schedule">封好，预约寄送</button><button type="button" class="pj-secondary" data-action="mail-now">立即寄出</button></div>
+    <div class="pj-mail-actions"><button type="button" data-action="mail-preview">预览封信动画</button><button type="button" class="pj-primary" data-action="mail-schedule">封好，预约寄送</button><button type="button" class="pj-secondary" data-action="mail-now">立即寄出</button></div>
     <p>到达或跨过所选日期时，在本轮正文结束后寄出。关闭酒馆期间不会运行；重新打开聊天后会检查到期信件。</p>
     <h4>${activeType === 'mail' ? '全部信件' : '当天信件'} · ${items.length} 封</h4>
-    <div class="pj-mail-list">${items.map(mail => `<details ${mail.status === 'pending' ? 'open' : ''}><summary>${mail.kind === 'letter' ? '情书' : '贺卡'} · ${{ pending: '待寄出', sent: '已寄出', cancelled: '已取消' }[mail.status]}</summary><p>${escapeHtml(mail.date)} · ${escapeHtml(mail.sender)} → ${escapeHtml(mail.recipient)}</p>${mail.status === 'pending' && mailDateWarning(mail.date, clock) ? `<p role="status">${escapeHtml(mailDateWarning(mail.date, clock))}</p>` : ''}<div class="pj-mail-text">${escapeHtml(mail.body)}</div>${mail.status === 'sent' ? '<p>已进入当前聊天，下一轮角色回复可回应。</p>' : ''}${mail.error ? `<p role="alert">${escapeHtml(mail.error)}</p>` : ''}${mail.status === 'pending' ? `<div class="pj-mail-actions"><button type="button" data-mail-send="${escapeHtml(mail.id)}">${mail.error ? '重试寄送' : '现在寄出'}</button><button type="button" data-mail-cancel="${escapeHtml(mail.id)}">取消预约</button></div>` : ''}</details>`).join('') || '<p>还没有预约信件。</p>'}</div>
+    <div class="pj-mail-list">${items.map(mail => `<details ${mail.status === 'pending' ? 'open' : ''}><summary>${mail.kind === 'letter' ? '情书' : '贺卡'} · ${{ pending: '待寄出', sent: '已寄出', cancelled: '已取消' }[mail.status]}</summary><p>${escapeHtml(mail.date)} · ${escapeHtml(mail.sender)} → ${escapeHtml(mail.recipient)}</p>${mail.status === 'pending' && mailDateWarning(mail.date, clock) ? `<p role="status">${escapeHtml(mailDateWarning(mail.date, clock))}</p>` : ''}<div class="pj-mail-text">${escapeHtml(mail.body)}</div><button type="button" class="pj-text-button" data-mail-preview="${escapeHtml(mail.id)}">重看封信动画</button>${mail.status === 'sent' ? '<p>已进入当前聊天，下一轮角色回复可回应。</p>' : ''}${mail.error ? `<p role="alert">${escapeHtml(mail.error)}</p>` : ''}${mail.status === 'pending' ? `<div class="pj-mail-actions"><button type="button" data-mail-send="${escapeHtml(mail.id)}">${mail.error ? '重试寄送' : '现在寄出'}</button><button type="button" data-mail-cancel="${escapeHtml(mail.id)}">取消预约</button></div>` : ''}</details>`).join('') || '<p>还没有预约信件。</p>'}</div>
   </section>`;
 }
 
@@ -3207,12 +3352,6 @@ function renderControls() {
   const controls = root?.querySelector('.pj-controls');
   if (!controls || !currentBook) return;
   controls.hidden = false;
-  if (activeType === 'impression') {
-    const focusButtons = Object.entries(IMPRESSION_FOCUSES).map(([key, value]) =>
-      `<button class="pj-choice ${key === activeImpressionFocus ? 'active' : ''}" data-impression-focus="${key}">${escapeHtml(value.label)}</button>`).join('');
-    controls.innerHTML = `<div class="pj-choice-row">${focusButtons}</div>${activeImpressionFocus === 'custom' ? `<input class="pj-custom-request" data-impression-request value="${escapeHtml(customImpressionRequest)}" placeholder="想记住他的哪一面？">` : ''}`;
-    return;
-  }
   if (activeType === 'romance_diary') {
     const relationship = currentBook.relationship || {};
     const unlocked = isRomanceUnlocked();
@@ -3242,8 +3381,91 @@ function renderControls() {
   controls.hidden = true;
 }
 
+function bindApiRouter(host) {
+  host.addEventListener('click', async event => {
+    const action = event.target.closest('[data-action]')?.dataset.action;
+    if (action === 'refresh-api-profiles') {
+      renderApiRouter();
+      toastr.info('已刷新 SillyTavern 连接配置列表。', '私语手札');
+    }
+    if (action === 'fetch-secondary-models') {
+      const button = event.target.closest('[data-action="fetch-secondary-models"]');
+      if (button) button.disabled = true;
+      setStatus('正在从副 API 拉取模型…');
+      try {
+        const profileId = host.querySelector('[data-setting="secondaryProfileId"]')?.value || '';
+        const profile = secondaryProfiles().find(item => item.id === profileId);
+        if (!profile) throw new Error('请先选择 API 名称和连接配置');
+        const settings = getSettings();
+        settings.secondaryApiKey = profileApiKey(profile);
+        settings.secondaryProfileId = profile.id;
+        if (!settings.secondaryModelId) settings.secondaryModelId = profile.model || '';
+        ctx().saveSettingsDebounced?.();
+        const models = await fetchSecondaryModels(profileId);
+        setStatus(`已拉取 ${models.length} 个副 API 模型`);
+        toastr.success(`已获取 ${models.length} 个模型，可在输入框中选择。`, '私语手札');
+      } catch (error) {
+        setStatus(`模型拉取失败：${error?.message || error}`);
+        toastr.error(`模型拉取失败：${error?.message || error}`, '私语手札');
+      } finally {
+        renderApiRouter();
+      }
+    }
+  });
+  host.addEventListener('input', event => {
+    if (event.target.matches('[data-setting="secondaryModelId"]')) {
+      getSettings().secondaryModelId = event.target.value.trim();
+      ctx().saveSettingsDebounced?.();
+    }
+  });
+  host.addEventListener('change', event => {
+    if (event.target.matches('[data-setting="secondaryModelId"]')) {
+      getSettings().secondaryModelId = event.target.value.trim();
+      ctx().saveSettingsDebounced?.();
+    }
+    if (event.target.matches('[data-setting="generationApiMode"]')) {
+      const mode = event.target.value === 'secondary' ? 'secondary' : 'main';
+      const settings = getSettings();
+      settings.generationApiMode = mode;
+      if (mode === 'secondary') {
+        const selection = resolvedSecondarySelection(settings);
+        settings.secondaryApiKey = selection.apiKey;
+        settings.secondaryProfileId = selection.selectedProfile?.id || '';
+        if (!settings.secondaryModelId) settings.secondaryModelId = selection.selectedProfile?.model || '';
+      }
+      ctx().saveSettingsDebounced?.();
+      renderApiRouter();
+      setStatus(mode === 'secondary' ? '手札将使用所选副 API' : '手札将跟随正文 API');
+    }
+    if (event.target.matches('[data-setting="secondaryApiKey"]')) {
+      const settings = getSettings();
+      settings.secondaryApiKey = event.target.value;
+      const profile = profilesForSecondaryApi(settings.secondaryApiKey)[0] || null;
+      settings.secondaryProfileId = profile?.id || '';
+      settings.secondaryModelId = profile?.model || '';
+      secondaryModelsProfileId = '';
+      secondaryModelOptions = [];
+      ctx().saveSettingsDebounced?.();
+      renderApiRouter();
+      setStatus(profile ? `已选择 ${profileApiDisplayName(profile)}` : '请先在 SillyTavern 保存该 API 的连接配置');
+    }
+    if (event.target.matches('[data-setting="secondaryProfileId"]')) {
+      const settings = getSettings();
+      settings.secondaryProfileId = event.target.value;
+      const profile = secondaryProfiles().find(profile => profile.id === event.target.value);
+      settings.secondaryApiKey = profileApiKey(profile) || settings.secondaryApiKey;
+      settings.secondaryModelId = profile?.model || '';
+      secondaryModelsProfileId = '';
+      secondaryModelOptions = [];
+      ctx().saveSettingsDebounced?.();
+      renderApiRouter();
+      setStatus(event.target.value ? '已切换副 API 连接配置' : '请选择副 API 连接配置');
+    }
+  });
+}
+
 function renderApiRouter() {
-  const host = root?.querySelector('.pj-api-router-host');
+  const host = document.querySelector('#private-journal-extension-entry .pj-api-router-host');
   if (!host) return;
   const settings = getSettings();
   const profiles = secondaryProfiles();
@@ -3273,7 +3495,7 @@ function renderApiRouter() {
     : `当前配置：${selectedProfile?.model || '未指定模型'}`;
 
   host.innerHTML = `<details class="pj-api-router" ${wasOpen ? 'open' : ''}>
-    <summary><span>生成接口</span><strong>${escapeHtml(summary)}</strong></summary>
+    <summary><span>API 设置</span><strong>${escapeHtml(summary)}</strong></summary>
     <div class="pj-api-popover">
       <div class="pj-api-mode" role="radiogroup" aria-label="选择手札生成接口">
         <label><input type="radio" name="pj-generation-api" data-setting="generationApiMode" value="main" ${mode === 'main' ? 'checked' : ''}><span><strong>跟随正文</strong></span></label>
@@ -3312,8 +3534,6 @@ function render() {
   const follow = root.querySelector('[data-setting="followMainGeneration"]');
   if (follow) follow.checked = Boolean(getSettings().followMainGeneration);
   renderApiRouter();
-  const apiHost = root.querySelector('.pj-api-router-host');
-  if (apiHost) apiHost.hidden = activeType === 'calendar' || activeType === 'mail';
   setGeneratingUi(journalGenerationActive);
   const generateButton = root.querySelector('[data-action="generate"]');
   if (generateButton && activeType === 'romance_diary' && !isRomanceUnlocked()) generateButton.disabled = true;
@@ -3351,7 +3571,6 @@ function turnToType(type) {
 function bind() {
   root.addEventListener('click', async event => {
     const type = event.target.closest('[data-type]')?.dataset.type;
-    const impressionFocus = event.target.closest('[data-impression-focus]')?.dataset.impressionFocus;
     const themeOption = event.target.closest('[data-theme-option]')?.dataset.themeOption;
     const deskOption = event.target.closest('[data-desk-option]')?.dataset.deskOption;
     const action = event.target.closest('[data-action]')?.dataset.action;
@@ -3363,35 +3582,53 @@ function bind() {
     const stickerDelete = event.target.closest('[data-sticker-delete]')?.dataset.stickerDelete;
     const mailSend = event.target.closest('[data-mail-send]')?.dataset.mailSend;
     const mailCancel = event.target.closest('[data-mail-cancel]')?.dataset.mailCancel;
+    const previewId = event.target.closest('[data-mail-preview]')?.dataset.mailPreview;
+    if (action === 'mail-preview' || previewId) {
+      const mail = previewId ? currentBook.scheduledMail.find(item => item.id === previewId) : { ...mailDraft, date: selectedCalendarDate };
+      if (mail?.body?.trim()) void playMailAnimation(mail);
+      else safeToastr('info', '先写几句话，就可以预览封信动画。');
+      return;
+    }
     if (action === 'mail-schedule' || action === 'mail-now' || mailSend || mailCancel) {
+      if (mailActionActive) return;
+      mailActionActive = true;
+      const book = currentBook, key = storageKey();
+      let animationMail = null, outcome = 'scheduled';
       try {
         if (mainGenerationActive || journalGenerationActive || relationshipCheckActive || hostReportsMainGenerationActive()) throw new Error('请等待当前生成结束后再操作信箱');
         if (mailCancel) {
-          cancelScheduledMail(currentBook, mailCancel);
-          await saveBook();
-          setStatus('预约已取消，不会寄出');
+          cancelScheduledMail(book, mailCancel);
+          await saveSpecificBook(book, key);
+          if (book === currentBook && key === storageKey()) setStatus('预约已取消，不会寄出');
         } else if (mailSend) {
-          if (!await deliverScheduledMail(currentBook, currentBook.scheduledMail.find(mail => mail.id === mailSend))) setStatus('信件仍在待寄列表，请等待当前生成结束后重试');
+          const mail = book.scheduledMail.find(item => item.id === mailSend);
+          if (await deliverScheduledMail(book, mail)) { animationMail = mail; outcome = 'sent'; }
+          else if (book === currentBook) setStatus('信件仍在待寄列表，请等待当前生成结束后重试');
         } else {
-          const mail = createScheduledMail(currentBook, { ...mailDraft, date: selectedCalendarDate });
-          await saveBook();
+          const mail = createScheduledMail(book, { ...mailDraft, date: selectedCalendarDate });
+          if (!await saveSpecificBook(book, key)) throw new Error('信件尚未持久保存，请先导出备份后重试');
+          if (book !== currentBook || key !== storageKey()) return;
           mailDraft = { kind: 'card', body: '' };
           if (action === 'mail-now') {
-            if (!await deliverScheduledMail(currentBook, mail)) setStatus('信件已保存在待寄列表，请等待当前生成结束后重试');
-          }
-          else {
-            setStatus(`已预约 ${selectedCalendarDate} 寄出`);
-            const warning = mailDateWarning(selectedCalendarDate, currentBook.mailClock?.date);
+            if (await deliverScheduledMail(book, mail)) { animationMail = mail; outcome = 'sent'; }
+            else setStatus('信件已保存在待寄列表，请等待当前生成结束后重试');
+          } else {
+            animationMail = mail;
+            setStatus(`已预约 ${mail.date} 寄出`);
+            const warning = mailDateWarning(mail.date, book.mailClock?.date);
             if (warning) safeToastr('warning', warning);
             scheduleMailCheck();
           }
         }
-        render();
+        if (book === currentBook && key === storageKey()) {
+          render();
+          if (animationMail) void playMailAnimation(animationMail, outcome);
+        }
       } catch (error) { safeToastr('error', error?.message || String(error)); }
+      finally { mailActionActive = false; }
       return;
     }
     if (type) turnToType(type);
-    if (impressionFocus) { activeImpressionFocus = impressionFocus; render(); }
     if (themeOption && THEMES[themeOption]) {
       getSettings().theme = themeOption;
       ctx().saveSettingsDebounced?.();
@@ -3455,33 +3692,6 @@ function bind() {
     if (action === 'reset-relationship') await resetRelationship();
     if (action === 'export') exportBook();
     if (action === 'export-word') exportWordDocument();
-    if (action === 'refresh-api-profiles') {
-      renderApiRouter();
-      toastr.info('已刷新 SillyTavern 连接配置列表。', '私语手札');
-    }
-    if (action === 'fetch-secondary-models') {
-      const button = event.target.closest('[data-action="fetch-secondary-models"]');
-      if (button) button.disabled = true;
-      setStatus('正在从副 API 拉取模型…');
-      try {
-        const profileId = root.querySelector('[data-setting="secondaryProfileId"]')?.value || '';
-        const profile = secondaryProfiles().find(item => item.id === profileId);
-        if (!profile) throw new Error('请先选择 API 名称和连接配置');
-        const settings = getSettings();
-        settings.secondaryApiKey = profileApiKey(profile);
-        settings.secondaryProfileId = profile.id;
-        if (!settings.secondaryModelId) settings.secondaryModelId = profile.model || '';
-        ctx().saveSettingsDebounced?.();
-        const models = await fetchSecondaryModels(profileId);
-        setStatus(`已拉取 ${models.length} 个副 API 模型`);
-        toastr.success(`已获取 ${models.length} 个模型，可在输入框中选择。`, '私语手札');
-      } catch (error) {
-        setStatus(`模型拉取失败：${error?.message || error}`);
-        toastr.error(`模型拉取失败：${error?.message || error}`, '私语手札');
-      } finally {
-        renderApiRouter();
-      }
-    }
     if (deleteId) {
       event.preventDefault();
       event.stopPropagation();
@@ -3490,17 +3700,12 @@ function bind() {
   });
   root.addEventListener('input', event => {
     if (event.target.matches('[data-mail-body]')) mailDraft.body = event.target.value;
-    if (event.target.matches('[data-impression-request]')) customImpressionRequest = event.target.value;
     if (event.target.matches('[data-quote-input]')) {
       quoteDraft = event.target.value;
       setGeneratingUi(false);
     }
     if (event.target.matches('[data-quote-speaker]')) quoteSpeakerDraft = event.target.value;
     if (event.target.matches('[data-page-editor]')) editingPageDraft = event.target.value;
-    if (event.target.matches('[data-setting="secondaryModelId"]')) {
-      getSettings().secondaryModelId = event.target.value.trim();
-      ctx().saveSettingsDebounced?.();
-    }
   });
   root.addEventListener('change', event => {
     if (event.target.matches('[data-setting="font"]') && FONTS[event.target.value]) {
@@ -3536,48 +3741,7 @@ function bind() {
       ctx().saveSettingsDebounced?.();
       setStatus(event.target.checked ? '已开启：故事跨日后一次整理全部栏目' : '已关闭自动整理');
     }
-    if (event.target.matches('[data-setting="secondaryModelId"]')) {
-      getSettings().secondaryModelId = event.target.value.trim();
-      ctx().saveSettingsDebounced?.();
-    }
-    if (event.target.matches('[data-setting="generationApiMode"]')) {
-      const mode = event.target.value === 'secondary' ? 'secondary' : 'main';
-      const settings = getSettings();
-      settings.generationApiMode = mode;
-      if (mode === 'secondary') {
-        const selection = resolvedSecondarySelection(settings);
-        settings.secondaryApiKey = selection.apiKey;
-        settings.secondaryProfileId = selection.selectedProfile?.id || '';
-        if (!settings.secondaryModelId) settings.secondaryModelId = selection.selectedProfile?.model || '';
-      }
-      ctx().saveSettingsDebounced?.();
-      renderApiRouter();
-      setStatus(mode === 'secondary' ? '手札将使用所选副 API' : '手札将跟随正文 API');
-    }
-    if (event.target.matches('[data-setting="secondaryApiKey"]')) {
-      const settings = getSettings();
-      settings.secondaryApiKey = event.target.value;
-      const profile = profilesForSecondaryApi(settings.secondaryApiKey)[0] || null;
-      settings.secondaryProfileId = profile?.id || '';
-      settings.secondaryModelId = profile?.model || '';
-      secondaryModelsProfileId = '';
-      secondaryModelOptions = [];
-      ctx().saveSettingsDebounced?.();
-      renderApiRouter();
-      setStatus(profile ? `已选择 ${profileApiDisplayName(profile)}` : '请先在 SillyTavern 保存该 API 的连接配置');
-    }
-    if (event.target.matches('[data-setting="secondaryProfileId"]')) {
-      const settings = getSettings();
-      settings.secondaryProfileId = event.target.value;
-      const profile = secondaryProfiles().find(profile => profile.id === event.target.value);
-      settings.secondaryApiKey = profileApiKey(profile) || settings.secondaryApiKey;
-      settings.secondaryModelId = profile?.model || '';
-      secondaryModelsProfileId = '';
-      secondaryModelOptions = [];
-      ctx().saveSettingsDebounced?.();
-      renderApiRouter();
-      setStatus(event.target.value ? '已切换副 API 连接配置' : '请选择副 API 连接配置');
-    }
+
   });
 }
 
@@ -3624,6 +3788,7 @@ function showJournalSurface(source = 'api') {
 }
 
 function closeJournalSurface({ restoreLauncher = true } = {}) {
+  closeMailAnimation({ restoreFocus: false });
   if (!root) return;
   root.classList.remove('open');
   if (root.tagName === 'DIALOG' && root.open && typeof root.close === 'function') {
@@ -3901,9 +4066,11 @@ function installExtensionDrawerEntry() {
     <span class="fa-solid fa-book-open" aria-hidden="true"></span>
     <span class="pj-extension-entry-copy"><strong>私语手札</strong><small>打开当前聊天的私人手札</small></span>
     <span class="fa-solid fa-chevron-right" aria-hidden="true"></span>
-  </button>`;
+  </button><div class="pj-api-router-host"></div>`;
+  bindApiRouter(entry.querySelector('.pj-api-router-host'));
   bindJournalActivation(entry.querySelector('button'), 'drawer-entry');
   extensionsDrawer.prepend(entry);
+  renderApiRouter();
   return true;
 }
 
@@ -4026,6 +4193,7 @@ function removeJournalDomArtifacts() {
 }
 
 function cleanupPluginInstance(reason = 'unspecified') {
+  closeMailAnimation({ restoreFocus: false });
   trace('cleanupPluginInstance', { reason, hadRoot: Boolean(root), revision: initializationRevision });
   initializationRevision += 1;
   bookLoadRevision += 1;
@@ -4085,7 +4253,7 @@ async function initialize({ reason = 'bootstrap' } = {}) {
         <div class="pj-page-turner" aria-hidden="true"></div>
         <nav><h1 class="pj-title"></h1><details class="pj-font-menu"><summary>字体</summary><div class="pj-font-panel"><label>正文与信件字体<select data-setting="font">${Object.entries(FONTS).map(([key, font]) => `<option value="${key}">${font.label}</option>`).join('')}</select></label><p class="pj-font-preview">把今日写成回忆。<br>My dear, always with you.</p><small>在线字体首次选用需要联网；英文花体已内置，中文使用系统字体。</small><small data-font-status role="status" aria-live="polite"></small><button type="button" data-action="retry-font" hidden>重试字体加载</button></div></details><button class="pj-inner-close" data-action="close" aria-label="关闭">×</button></nav>
         <div class="pj-tabs" role="tablist" aria-label="书签目录"></div><div class="pj-controls"></div><main class="pj-pages"></main>
-        <footer><div class="pj-footer-state"><label title="故事跨日时通常请求一次；检测到截断时最多追加两次补全"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><div class="pj-api-router-host"></div><span class="pj-status"></span><span class="pj-runtime-version">v${PLUGIN_VERSION}</span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
+        <footer><div class="pj-footer-state"><label title="故事跨日时通常请求一次；检测到截断时最多追加两次补全"><input type="checkbox" data-setting="followMainGeneration"> 按故事日自动整理</label><span class="pj-status"></span><span class="pj-runtime-version">v${PLUGIN_VERSION}</span></div><div class="pj-footer-actions"><button class="pj-secondary" data-action="export">备份 JSON</button><button class="pj-secondary" data-action="export-word">导出 Word</button><button class="pj-primary" data-action="generate">写下这一页</button></div></footer>
       </div>
     </div>
     <div class="pj-style-palette" aria-label="选择手札装帧">
@@ -4125,6 +4293,7 @@ async function initialize({ reason = 'bootstrap' } = {}) {
     const context = ctx();
     const eventSource = context.eventSource;
     bindContextEvent(eventSource, context.eventTypes?.CHAT_CHANGED, () => {
+      closeMailAnimation({ restoreFocus: false });
       clearTimeout(mailCheckTimer);
       mailDraft = { kind: 'card', body: '' };
       currentBook = blankBook();

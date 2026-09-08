@@ -27,7 +27,7 @@
   --pj-name-color:#34271f;
   --pj-pan-x:0px;
   --pj-pan-y:0px;
-  --pj-stylesheet-version:"0.23.4";
+  --pj-stylesheet-version:"0.24.0";
   position:fixed;
   inset:0;
   z-index:9999;
@@ -882,3 +882,54 @@
   #private-journal.page-turning .pj-page-turner { display:none; animation:none; }
   #private-journal.page-turning .pj-controls,#private-journal.page-turning .pj-pages { animation:none; }
 }
+
+/* API settings live in the host extensions drawer, including on phones. */
+#private-journal-extension-entry { --pj-font-ui:system-ui,"Microsoft YaHei",sans-serif; --pj-accent:#76604f; }
+#private-journal-extension-entry .pj-api-router-host { margin:8px 0; }
+#private-journal-extension-entry .pj-api-router>summary { min-height:44px; font-size:13px; background:#f7f1e6; color:#493a33; }
+#private-journal-extension-entry .pj-api-router>summary strong { max-width:none; white-space:normal; }
+#private-journal-extension-entry .pj-api-popover { position:static; width:100%; max-height:none; transform:none; box-shadow:none; margin-top:8px; padding:12px; color:#493a33; }
+#private-journal-extension-entry .pj-api-popover::after { display:none; }
+#private-journal-extension-entry .pj-api-mode>label { min-height:44px; }
+#private-journal-extension-entry .pj-profile-picker :is(select,input,button) { min-height:44px; font-size:16px!important; }
+#private-journal-extension-entry .pj-profile-picker p { font-size:12px; color:#68544a; }
+
+/* Five compressed reference sheets are used as CSS sprites; no video or library. */
+.pj-mail-animation { box-sizing:border-box; width:min(500px,calc(100vw - 24px)); max-width:none; max-height:calc(100dvh - 24px); overflow:auto; padding:22px; border:1px solid #ad9973; border-radius:14px; color:#514132; background:#f4ecdf; box-shadow:0 28px 90px #221c1b77; font:14px/1.55 system-ui,"Microsoft YaHei",sans-serif; }
+.pj-mail-animation::backdrop { background:#191610b3; }
+.pj-mail-animation header { display:flex; justify-content:space-between; align-items:start; gap:12px; }
+.pj-mail-animation small { font-size:12px; color:#736452; }
+.pj-mail-animation h2 { color:#514132; font:600 20px/1.5 "Songti SC",SimSun,serif; margin:5px 0 0; }
+.pj-mail-animation button { flex-shrink:0; min-width:54px; min-height:44px; padding:8px; border:1px solid #a3947c; border-radius:6px; color:#514132; background:#fffbf3; cursor:pointer; }
+.pj-mail-animation button:focus-visible { outline:2px solid #635242; outline-offset:3px; }
+.pj-mail-stage { --envelope-top:234px; position:relative; height:558px; margin:12px auto; isolation:isolate; perspective:1000px; }
+.pj-mail-paper { position:absolute; z-index:3; top:8px; left:50%; width:180px; height:278px; margin-left:-90px; transition:transform 1150ms cubic-bezier(.4,0,.2,1); }
+.pj-mail-paper-turn { width:100%; height:100%; position:relative; transform-style:preserve-3d; transition:transform 800ms cubic-bezier(.3,.1,.25,1); }
+.pj-mail-paper-front,.pj-mail-paper-back { position:absolute; inset:0; backface-visibility:hidden; -webkit-backface-visibility:hidden; border-radius:2px; box-shadow:0 8px 20px #352b263d; }
+.pj-mail-paper-front { background-color:#f7efde; background-image:var(--pj-mail-art); background-size:var(--paper-size); background-position:var(--paper-pos); }
+.pj-mail-paper-back { transform:rotateY(180deg); background-color:#58634d; background-image:var(--pj-mail-art); background-size:var(--back-size); background-position:var(--back-pos); }
+.pj-mail-ink { position:absolute; inset:20px 18px; overflow:hidden; white-space:pre-wrap; overflow-wrap:anywhere; color:#4a3a2c; font:13px/1.85 var(--pj-mail-font); animation:pj-mail-write 1550ms ease-out both; mask-image:linear-gradient(#000 88%,transparent); }
+.pj-mail-envelope-base,.pj-mail-envelope-face,.pj-mail-envelope-flap { position:absolute; left:50%; top:var(--envelope-top); width:204px; height:314px; margin-left:-102px; opacity:0; transition:opacity 450ms,transform 800ms cubic-bezier(.4,0,.2,1); }
+.pj-mail-envelope-base { z-index:1; background:var(--envelope-color,#ddd1b5); box-shadow:0 12px 25px #352b263d; border-radius:2px; }
+.pj-mail-envelope-face { z-index:4; clip-path:var(--pocket-shape); background-image:var(--pj-mail-art); background-size:var(--envelope-size); background-position:var(--envelope-pos); }
+.pj-mail-envelope-flap { z-index:5; transform-origin:center top; clip-path:var(--flap-shape); background-color:var(--envelope-color); background-image:var(--pj-mail-art); background-size:var(--envelope-size); background-position:var(--envelope-pos); backface-visibility:visible; }
+.pj-mail-stage:not([data-phase="writing"]) .pj-mail-paper-turn { transform:rotateY(180deg); }
+.pj-mail-stage:is([data-phase="flipping"],[data-phase="opening"],[data-phase="inserting"],[data-phase="closing"],[data-phase="sealed"]) :is(.pj-mail-envelope-base,.pj-mail-envelope-face,.pj-mail-envelope-flap) { opacity:1; }
+.pj-mail-stage:is([data-phase="opening"],[data-phase="inserting"]) .pj-mail-envelope-flap { transform:rotateX(180deg); z-index:2; }
+.pj-mail-stage:is([data-phase="inserting"],[data-phase="closing"],[data-phase="sealed"]) .pj-mail-paper { transform:translateY(calc(var(--envelope-top) + 4px)) scale(.9); }
+.pj-mail-animation-step { margin:0; text-align:center; color:#66513a; font-size:15px; }
+.pj-mail-animation-result { text-align:center; color:#72634f; font-size:12px; margin:8px 0 0; }
+@keyframes pj-mail-write { from { clip-path:inset(0 0 100%); opacity:0; } to { clip-path:inset(0); opacity:1; } }
+@media(max-width:480px) { .pj-mail-animation { padding:16px; } .pj-mail-stage { --envelope-top:226px; height:550px; } }
+@media(max-height:700px) { .pj-mail-stage { zoom:.78; } }
+@media(prefers-reduced-motion:reduce) { .pj-mail-animation * { animation:none!important; transition:none!important; } }
+
+.pj-mail-animation[data-theme="rococo-garden"] { --back-size:330.323% 145.248%; --back-pos:4.669% 52.665%; --paper-size:382.090% 149.054%; --paper-pos:49.118% 52.226%; --envelope-size:312.831% 131.620%; --envelope-pos:95.981% 50.407%; --envelope-color:#bcc8c9; --flap-shape:polygon(0% 0%,100% 0%,97% 17%,87% 20%,81% 31%,69% 35%,64% 43%,50% 55%,36% 43%,31% 35%,19% 31%,13% 20%,3% 17%); --pocket-shape:polygon(0% 0%,3% 17%,13% 20%,19% 31%,31% 35%,36% 43%,50% 55%,64% 43%,69% 35%,81% 31%,87% 20%,97% 17%,100% 0%,100% 100%,0% 100%); }
+
+.pj-mail-animation[data-theme="magnolia-swallow"] { --back-size:336.105% 150.810%; --back-pos:4.727% 48.696%; --paper-size:375.550% 151.479%; --paper-pos:49.689% 48.851%; --envelope-size:339.073% 141.828%; --envelope-pos:95.937% 49.338%; --envelope-color:#947c5c; --flap-shape:polygon(0% 0%,100% 0%,92% 20%,50% 41%,8% 20%); --pocket-shape:polygon(0% 0%,8% 20%,50% 41%,92% 20%,100% 0%,100% 100%,0% 100%); }
+
+.pj-mail-animation[data-theme="italian-marble"] { --back-size:349.091% 158.025%; --back-pos:5.383% 51.064%; --paper-size:373.723% 158.514%; --paper-pos:49.067% 51.058%; --envelope-size:324.051% 151.929%; --envelope-pos:95.574% 49.429%; --envelope-color:#55553b; --flap-shape:polygon(0% 0%,100% 0%,95% 13%,55% 46%,50% 47%,45% 46%,5% 13%); --pocket-shape:polygon(0% 0%,5% 13%,45% 46%,50% 47%,55% 46%,95% 13%,100% 0%,100% 100%,0% 100%); }
+
+.pj-mail-animation[data-theme="indigo-reed"] { --back-size:342.094% 145.042%; --back-pos:4.968% 58.491%; --paper-size:353.917% 145.455%; --paper-pos:49.637% 57.812%; --envelope-size:331.749% 134.031%; --envelope-pos:96.179% 52.692%; --envelope-color:#eee9dc; --flap-shape:polygon(0% 0%,100% 0%,98% 11%,53% 38%,50% 39%,47% 38%,2% 11%); --pocket-shape:polygon(0% 0%,2% 11%,47% 38%,50% 39%,53% 38%,98% 11%,100% 0%,100% 100%,0% 100%); }
+
+.pj-mail-animation[data-theme="botanical-noir"] { --back-size:338.326% 150.367%; --back-pos:5.176% 46.356%; --paper-size:357.209% 150.367%; --paper-pos:50.814% 46.939%; --envelope-size:344.395% 145.455%; --envelope-pos:95.963% 48.750%; --envelope-color:#394331; --flap-shape:polygon(0% 0%,100% 0%,98% 10%,53% 66%,50% 69%,47% 66%,2% 10%); --pocket-shape:polygon(0% 0%,2% 10%,47% 66%,50% 69%,53% 66%,98% 10%,100% 0%,100% 100%,0% 100%); }
