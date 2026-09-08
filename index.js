@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.24.0';
+const PLUGIN_VERSION = '0.24.1';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -281,11 +281,11 @@ function ensureWebFont(key, retry = false) {
 }
 
 const DESKS = {
-  'pearl-cream': { label: '珍珠奶油', shortLabel: '珍珠', asset: './assets/backgrounds/writing-desk.jpg' },
-  'forest-walnut': { label: '暮林胡桃', shortLabel: '暮林', asset: './assets/backgrounds/forest-walnut.webp' },
-  'light-ash': { label: '浅木芦影', shortLabel: '浅木', asset: './assets/backgrounds/light-ash.webp' },
-  'olive-warmwood': { label: '橄榄暖木', shortLabel: '暖木', asset: './assets/backgrounds/olive-warmwood.webp' },
-  'magnolia-inkstone': { label: '玉兰墨砚', shortLabel: '墨砚', asset: './assets/backgrounds/magnolia-inkstone.webp' },
+  'pearl-cream': { label: '珍珠奶油', shortLabel: '珍珠', asset: './assets/backgrounds/writing-desk-full.webp' },
+  'forest-walnut': { label: '暮林胡桃', shortLabel: '暮林', asset: './assets/backgrounds/forest-walnut-full.webp' },
+  'light-ash': { label: '浅木芦影', shortLabel: '浅木', asset: './assets/backgrounds/light-ash-full.webp' },
+  'olive-warmwood': { label: '橄榄暖木', shortLabel: '暖木', asset: './assets/backgrounds/olive-warmwood-full.webp' },
+  'magnolia-inkstone': { label: '玉兰墨砚', shortLabel: '墨砚', asset: './assets/backgrounds/magnolia-inkstone-full.webp' },
 };
 
 // --- Entry / activation instrumentation -----------------------------------
@@ -4062,11 +4062,17 @@ function installExtensionDrawerEntry() {
   entry.className = 'extension_container pj-extension-entry';
   entry.dataset.privateJournalEntry = 'drawer';
   entry.dataset.privateJournalInstance = INSTANCE_ID;
-  entry.innerHTML = `<button type="button" class="menu_button pj-extension-open-button" aria-label="打开私语手札">
-    <span class="fa-solid fa-book-open" aria-hidden="true"></span>
-    <span class="pj-extension-entry-copy"><strong>私语手札</strong><small>打开当前聊天的私人手札</small></span>
-    <span class="fa-solid fa-chevron-right" aria-hidden="true"></span>
-  </button><div class="pj-api-router-host"></div>`;
+  entry.innerHTML = `<details class="pj-extension-settings">
+    <summary class="pj-extension-heading"><strong>私语手札</strong><span class="pj-extension-chevron" aria-hidden="true">⌄</span></summary>
+    <div class="pj-extension-content">
+      <button type="button" class="menu_button pj-extension-open-button" aria-label="打开私语手札">
+        <span class="fa-solid fa-book-open" aria-hidden="true"></span>
+        <span class="pj-extension-entry-copy"><strong>打开手札</strong><small>查看当前聊天的私人手札</small></span>
+        <span class="fa-solid fa-chevron-right" aria-hidden="true"></span>
+      </button>
+      <div class="pj-api-router-host"></div>
+    </div>
+  </details>`;
   bindApiRouter(entry.querySelector('.pj-api-router-host'));
   bindJournalActivation(entry.querySelector('button'), 'drawer-entry');
   extensionsDrawer.prepend(entry);
