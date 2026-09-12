@@ -27,7 +27,7 @@
   --pj-name-color:#34271f;
   --pj-pan-x:0px;
   --pj-pan-y:0px;
-  --pj-stylesheet-version:"0.24.1";
+  --pj-stylesheet-version:"0.25.0";
   position:fixed;
   inset:0;
   z-index:9999;
@@ -591,6 +591,8 @@
 #private-journal .pj-font-panel select { width:100%; min-height:44px; background:#fffdf7; color:#49372f; border:1px solid #a48b70; font:16px/1.5 var(--pj-font-ui); }
 #private-journal .pj-font-panel small { display:block; font:12px/1.6 var(--pj-font-ui); }
 #private-journal .pj-font-preview { margin:14px 0; font:22px/1.8 var(--pj-font-prose); color:#3d3029; }
+#private-journal [data-generation-tasks] { display:block; max-width:100%; font:400 12px/1.6 system-ui,sans-serif; color:#655046; overflow-wrap:anywhere; }
+#private-journal [data-generation-tasks][hidden] { display:none; }
 #private-journal[data-font="running"],#private-journal[data-font="script"] { --pj-text-body:20px; --pj-leading-body:2; }
 #private-journal .pj-font-menu :focus-visible { outline:2px solid var(--pj-accent); outline-offset:2px; }
 #private-journal .pj-mail-shortcut { display:block; width:100%; min-height:44px; margin:0 0 14px; white-space:normal; }

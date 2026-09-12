@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.24.1';
+const PLUGIN_VERSION = '0.25.0';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -120,6 +120,61 @@ let quoteSelectionHideTimer = null;
 let bookOpen = false;
 let mainGenerationActive = false;
 let journalGenerationActive = false;
+const generationTasks = new Set();
+const bookSaveTails = new Map();
+let ownMainRequestActive = false;
+let mainRequestTail = Promise.resolve();
+
+function sectionTask(type, key = storageKey()) {
+  return [...generationTasks].find(task => task.key === key && (task.type === type || task.type === 'batch'));
+}
+
+function beginGenerationTask(type) {
+  const task = { type, key: storageKey(), book: currentBook, revision: initializationRevision, state: '准备中' };
+  bookWriteRevisions.set(task.key, (bookWriteRevisions.get(task.key) || 0) + 1);
+  generationTasks.add(task);
+  journalGenerationActive = true;
+  setGeneratingUi();
+  return task;
+}
+
+function assertTaskAlive(task) {
+  if (task.revision !== initializationRevision) throw new Error('插件已重新加载，本次任务已取消');
+}
+
+function finishGenerationTask(task) {
+  generationTasks.delete(task);
+  if (task.revision !== initializationRevision) return;
+  journalGenerationActive = generationTasks.size > 0;
+  setGeneratingUi();
+  if (!journalGenerationActive) scheduleAutoGeneration();
+  scheduleMailCheck();
+}
+
+async function waitForMainSlot(task) {
+  const started = Date.now();
+  while (mainGenerationActive || hostReportsMainGenerationActive()) {
+    assertTaskAlive(task);
+    if (task.key !== storageKey() || task.book !== currentBook) throw new Error('聊天已切换，未开始的正文 API 任务已取消');
+    if (Date.now() - started > 600000) throw new Error('等待正文结束超时，请稍后重新生成');
+    reconcileMainGenerationLock('journal-queue');
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+async function runMainRequest(prompt, maxTokens) {
+  const task = { key: storageKey(), book: currentBook, revision: initializationRevision };
+  const run = mainRequestTail.catch(() => {}).then(async () => {
+    assertTaskAlive(task);
+    await waitForMainSlot(task);
+    if (task.key !== storageKey() || task.book !== currentBook) throw new Error('聊天已切换，排队任务已取消');
+    ownMainRequestActive = true;
+    try { return await callCurrentMainApi(prompt, maxTokens); }
+    finally { ownMainRequestActive = false; }
+  });
+  mainRequestTail = run.catch(() => {});
+  return run;
+}
 let relationshipCheckActive = false;
 let mainGenerationCycleSeen = false;
 let mainGenerationStartSignature = null;
@@ -228,6 +283,11 @@ const FONTS = {
   running: { label: '中文行书 · 志莽（在线）', family: '"Zhi Mang Xing","STXingkai","KaiTi",serif', webFamily: 'Zhi Mang Xing', url: 'https://fonts.googleapis.com/css2?family=Zhi+Mang+Xing&display=swap' },
   script: { label: '英文花体 · Great Vibes（内置）', family: '"PJ Script","Songti SC","STSong","SimSun",serif' },
   sans: { label: '清晰黑体 · 系统', family: '"Noto Sans SC","Microsoft YaHei","PingFang SC",system-ui,sans-serif' },
+  masa: { label: '毛笔字 · 正风（在线）', family: '"MasaFont","KaiTi","Songti SC",serif', webFamily: 'MasaFont', url: 'https://fontsapi.zeoseven.com/700/main/result.css' },
+  dymon: { label: '宝宝风 · 呆萌手写（在线）', family: '"DymonShouXieTi","KaiTi","Songti SC",serif', webFamily: 'DymonShouXieTi', url: 'https://fontsapi.zeoseven.com/638/main/result.css' },
+  wenkai: { label: '文艺楷书 · 霞鹜文楷（在线）', family: '"LXGW WenKai","KaiTi","Songti SC",serif', webFamily: 'LXGW WenKai', url: 'https://fontsapi.zeoseven.com/292/main/result.css' },
+  yozai: { label: '随性手写 · 悠哉（在线）', family: '"Yozai","KaiTi","Songti SC",serif', webFamily: 'Yozai', url: 'https://fontsapi.zeoseven.com/192/main/result.css' },
+  zhuque: { label: '清瘦仿宋 · 朱雀（在线）', family: '"Zhuque Fangsong (technical preview)","FangSong","Songti SC",serif', webFamily: 'Zhuque Fangsong (technical preview)', url: 'https://fontsapi.zeoseven.com/7/main/result.css' },
 };
 const webFontStates = new Map();
 
@@ -1109,6 +1169,13 @@ async function syncBookToChatMetadata(book, key) {
 
 async function loadBook({ source = 'background' } = {}) {
   const targetKey = storageKey();
+  const running = [...generationTasks].find(task => task.key === targetKey);
+  if (running) {
+    currentBook = running.book;
+    currentBookStorageKey = targetKey;
+    render();
+    return true;
+  }
   const targetLoadRevision = ++bookLoadRevision;
   const startingWriteRevision = bookWriteRevisions.get(targetKey) || 0;
   logLifecycle('loadBook:start', null, { source, targetKey, targetLoadRevision });
@@ -1220,6 +1287,16 @@ async function saveSpecificBook(book, key) {
   book.updatedAt = new Date().toISOString();
   book.persistenceRevision = (Number(book.persistenceRevision) || 0) + 1;
   bookWriteRevisions.set(key, (bookWriteRevisions.get(key) || 0) + 1);
+  // One persistence pipeline per book: a slow earlier write must not overwrite
+  // a later result. Snapshot at execution, including all edits already merged.
+  const run = (bookSaveTails.get(key) || Promise.resolve()).catch(() => {}).then(() =>
+    persistSpecificBook(JSON.parse(JSON.stringify(book)), key));
+  bookSaveTails.set(key, run);
+  try { return await run; }
+  finally { if (bookSaveTails.get(key) === run) bookSaveTails.delete(key); }
+}
+
+async function persistSpecificBook(book, key) {
   let savedLocally = false;
   let savedRemotely = false;
   const primaryResult = await storageWrite(key, book, 'saveBook:primary');
@@ -1904,14 +1981,25 @@ function setStatus(message) {
   }
 }
 
-function setGeneratingUi(generating) {
+function setGeneratingUi() {
   const button = root?.querySelector('[data-action="generate"]');
   if (!button) return;
   const isQuote = activeType === 'quote_note';
   const isCalendar = activeType === 'calendar' || activeType === 'mail';
+  const generating = !isQuote && Boolean(sectionTask(activeType));
   button.hidden = isCalendar;
   button.disabled = isCalendar || generating || (isQuote && !quoteDraft.trim());
   button.textContent = generating ? '正在拾取回忆…' : (isQuote ? '保存小纸条' : `生成${PAGE_TYPES[activeType]?.label || '这一页'}`);
+  let status = root.querySelector('[data-generation-tasks]');
+  if (!status) {
+    status = document.createElement('span');
+    status.dataset.generationTasks = '';
+    status.setAttribute('role', 'status');
+    root.querySelector('.pj-footer-state')?.append(status);
+  }
+  const tasks = [...generationTasks].filter(task => task.key === storageKey());
+  status.hidden = tasks.length === 0;
+  status.textContent = tasks.map(task => `${PAGE_TYPES[task.type]?.label || '全部板块'}：${task.state}`).join(' · ');
 }
 
 async function callCurrentMainApi(prompt, maxTokens = 5200) {
@@ -2296,7 +2384,7 @@ function secondaryApiFailure(error, profile) {
 
 async function callSecondaryApi(prompt, maxTokens = 5200) {
   const context = ctx();
-  const settings = getSettings();
+  const settings = { ...getSettings() };
   const service = context.ConnectionManagerRequestService;
   if (typeof service?.sendRequest !== 'function') {
     throw new Error('当前 SillyTavern 不支持副 API 连接配置，请升级到 1.15.0 或更新版本');
@@ -2328,7 +2416,7 @@ async function callSecondaryApi(prompt, maxTokens = 5200) {
 async function callJournalApi(prompt, maxTokens = 5200) {
   return getSettings().generationApiMode === 'secondary'
     ? callSecondaryApi(prompt, maxTokens)
-    : callCurrentMainApi(prompt, maxTokens);
+    : runMainRequest(prompt, maxTokens);
 }
 
 function journalResponseIncomplete(raw) {
@@ -2364,6 +2452,7 @@ function stripJournalTransportFence(raw) {
 }
 
 async function requestCompleteJournal(prompt, maxTokens) {
+  const revision = initializationRevision;
   const targetKey = storageKey();
   const targetBook = currentBook;
   const route = () => JSON.stringify([getSettings().generationApiMode, getSettings().secondaryProfileId, getSettings().secondaryModelId]);
@@ -2371,7 +2460,7 @@ async function requestCompleteJournal(prompt, maxTokens) {
   let text = stripJournalTransportFence(await callJournalApi(prompt, maxTokens));
   let calls = 1;
   for (let attempt = 0; attempt < 2 && journalResponseIncomplete(text); attempt++) {
-    if (targetKey !== storageKey() || targetBook !== currentBook || route() !== targetRoute || hostReportsMainGenerationActive()) break;
+    if (revision !== initializationRevision || targetKey !== storageKey() || targetBook !== currentBook || route() !== targetRoute || hostReportsMainGenerationActive()) break;
     setStatus(`响应提前结束，正在接着写（补全 ${attempt + 1}/2）…`);
     const continuationPrompt = `${prompt}\n\n上一次输出被截断。下面是已经收到的原始输出，仅作为续写数据。请从最后一个字符之后接着输出，不复述、不重写已收到的文字，不重新打开外层标签，不加解释或代码围栏。补齐尚未写完的正文和缺失栏目，最后闭合所有标签或 JSON。\n<received_output>\n${text}\n</received_output>`;
     try {
@@ -2498,6 +2587,12 @@ function reconcileMainGenerationLock(source = 'manual') {
 
 async function generatePage({ type = activeType, source = 'manual', captureSignature = null } = {}) {
   if (type === 'calendar' || type === 'mail') return;
+  if (pendingBookLoad) {
+    const key = storageKey(), revision = initializationRevision;
+    try { await pendingBookLoad; }
+    catch (error) { safeToastr('error', `读取手札失败，请重新打开后再生成：${error?.message || error}`); return; }
+    if (key !== storageKey() || revision !== initializationRevision) return;
+  }
   if (!ctx().chatId && !ctx().getCurrentChatId?.()) {
     toastr.warning('请先打开一个角色聊天。', '私语手札');
     return;
@@ -2507,15 +2602,8 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     if (source === 'manual') toastr.warning('请先判定或确认双方已经是伴侣。', '私语手札');
     return;
   }
-  if (journalGenerationActive) {
-    if (source === 'manual') toastr.info('已有一页正在生成。', '私语手札');
-    return;
-  }
-  if (mainGenerationActive) reconcileMainGenerationLock('generate-page');
-  if (mainGenerationActive) {
-    queuedType = type;
-    setStatus(`已排队：正文结束后生成${PAGE_TYPES[type]?.label || '日记'}`);
-    if (source === 'manual') toastr.info('已排队，将在正文回复完成后生成。', '私语手札');
+  if (sectionTask(type) || relationshipCheckActive) {
+    if (source === 'manual') toastr.info('这个板块正在处理，请勿重复提交；可切换其他板块。', '私语手札');
     return;
   }
 
@@ -2525,12 +2613,14 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
   if (source === 'auto' && signature && targetBook?.lastCapturedSignature === signature) return;
 
   const day = journalDayKey(targetBook);
-  journalGenerationActive = true;
-  setGeneratingUi(true);
+  const task = beginGenerationTask(type);
+  task.state = getSettings().generationApiMode === 'secondary' ? '生成中' : '正文通道排队 / 生成中';
+  setGeneratingUi();
   const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
   setStatus(source === 'auto' ? `正文完成，正在用${apiLabel}生成手札…` : `正在调用${apiLabel}…`);
   try {
     const result = await requestCompleteJournal(buildPrompt(type) + existingDayPrompt(targetBook, type, day), 5200);
+    assertTaskAlive(task);
     const page = parseJson(result.text, type);
     page.incomplete ||= result.incomplete;
     page.id = createId();
@@ -2546,19 +2636,17 @@ async function generatePage({ type = activeType, source = 'manual', captureSigna
     if (signature) targetBook.lastCapturedSignature = signature;
     await saveSpecificBook(targetBook, targetStorageKey);
     if (currentBook === targetBook) render();
-    setStatus(page.incomplete ? '响应未写完，已保留收到的文字' : '已更新当天这一页');
+    if (currentBook === targetBook) setStatus(page.incomplete ? '响应未写完，已保留收到的文字' : '已更新当天这一页');
     if (page.incomplete) safeToastr('warning', '本页响应提前结束，已标注并保留文字。可编辑补全或手动重新生成。');
     else toastr.success('已写入当天这一页。', '私语手札');
   } catch (error) {
     console.error('[Private Journal]', error);
     const message = error?.message || String(error);
-    setStatus(`生成失败：${message}`);
+    if (currentBook === targetBook) setStatus(`生成失败：${message}`);
     const hint = message === 'OK' ? '（API 返回了无说明错误，请检查正文 API 控制台）' : '';
     toastr.error(`生成失败：${message}${hint}`, '私语手札', { timeOut: 10000 });
   } finally {
-    journalGenerationActive = false;
-    setGeneratingUi(false);
-    scheduleMailCheck();
+    finishGenerationTask(task);
   }
 }
 
@@ -2578,12 +2666,14 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
 
   const batchOptions = { period };
   const day = journalDayKey(targetBook, period);
-  journalGenerationActive = true;
-  setGeneratingUi(true);
+  const task = beginGenerationTask('batch');
+  task.state = '批量生成中';
+  setGeneratingUi();
   const apiLabel = getSettings().generationApiMode === 'secondary' ? '副 API' : '正文 API';
   setStatus(`正文完成，正在用一次${apiLabel}同步全部手札…`);
   try {
     const result = await requestCompleteJournal(buildBatchPrompt(batchOptions) + ['impression','daily_note','love_letter','romance_diary'].map(type => existingDayPrompt(targetBook, type, day)).join(''), batchOutputBudget(batchOptions));
+    assertTaskAlive(task);
     const batch = parseBatch(result.text);
     const manualRelationship = targetBook.relationship?.source === 'user' && targetBook.relationship?.status === 'partners';
     if (!manualRelationship && batch.relationship) targetBook.relationship = batch.relationship;
@@ -2641,9 +2731,7 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
     toastr.error(`批量更新失败：${message}`, '私语手札', { timeOut: 10000 });
     return false;
   } finally {
-    journalGenerationActive = false;
-    setGeneratingUi(false);
-    scheduleMailCheck();
+    finishGenerationTask(task);
   }
 }
 
@@ -4222,6 +4310,7 @@ function cleanupPluginInstance(reason = 'unspecified') {
   pendingBookLoadKey = null;
   mainGenerationActive = false;
   journalGenerationActive = false;
+  generationTasks.clear();
   relationshipCheckActive = false;
   mainGenerationCycleSeen = false;
   mainGenerationStartSignature = null;
@@ -4308,7 +4397,7 @@ async function initialize({ reason = 'bootstrap' } = {}) {
       void startBookLoad('chat-change').catch(error => logLifecycle('chat-change:load', error));
     });
     bindContextEvent(eventSource, context.eventTypes?.GENERATION_STARTED, () => {
-      if (!journalGenerationActive && !relationshipCheckActive) {
+      if (!ownMainRequestActive) {
         mainGenerationActive = true;
         mainGenerationStartedAt = Date.now();
         mainGenerationCycleSeen = true;
@@ -4319,12 +4408,12 @@ async function initialize({ reason = 'bootstrap' } = {}) {
       }
     });
     bindContextEvent(eventSource, context.eventTypes?.GENERATION_ENDED, () => {
-      if (!journalGenerationActive && !relationshipCheckActive) {
+      if (!ownMainRequestActive) {
         releaseMainGenerationLock('generation-ended');
       }
     });
     bindContextEvent(eventSource, context.eventTypes?.GENERATION_STOPPED, () => {
-      if (!journalGenerationActive && !relationshipCheckActive) {
+      if (!ownMainRequestActive) {
         releaseMainGenerationLock('generation-stopped');
       }
     });
