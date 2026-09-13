@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.25.0';
+const PLUGIN_VERSION = '0.25.1';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1882,8 +1882,45 @@ function storyPeriod(fromKey, fromLabel, marker) {
   };
 }
 
+function storyClockText(content = '') {
+  // Only message source text is read: never the host's real-world message
+  // timestamps, arbitrary page DOM, or extra.reasoning / other plugin state.
+  return stripReasoningBlocks(content)
+    .replace(/<!--[\s\S]*?(?:--!?>|$)/g, ' ')
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ')
+    .replace(/<status(?:bar)?\b[^>]*>\s*((?:19|20)\d{2}[年/.-])/gi, '\n当前日期：$1')
+    .replace(/<\/?(?:br|p|div|tr|td|th|li|details|summary|status|statusbar)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/[\r]/g, '')
+    .replace(/[*_`]/g, '')
+    .replace(/(?:预约(?:故事)?日期|寄送日期|出生日期|生日)\s*[:：|｜]?\s*(?:19|20)\d{2}[年/.-]\d{1,2}[月/.-]\d{1,2}日?/g, ' ');
+}
+
+function validatedStoryDate(year, month, day) {
+  const y = Number(year), m = Number(month), d = Number(day);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return null;
+  return { type: 'absolute', key: `date:${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`, label: `${y}年${m}月${d}日` };
+}
+
+function detectStatusDayMarker(text) {
+  // Explicit current-date fields, including Markdown and HTML table cells.
+  // Do not match suffixes such as 预约日期 / 出生日期 or infer a day from HH:mm.
+  const pattern = /(?:^|[\n|｜【\[(])\s*[#>🗓📅📆🕒⏰\uFE0F\s]*(?:(?:当前|故事|剧情|世界)\s*)?(?:日期|时间|date|time)\s*(?:[:：|｜]\s*|\n\s*)((?:19|20)\d{2})[年/.-](\d{1,2})[月/.-](\d{1,2})(?:日|\b)/gimu;
+  let latest = null;
+  for (const match of text.matchAll(pattern)) {
+    const marker = validatedStoryDate(match[1], match[2], match[3]);
+    if (marker) latest = { ...marker, source: 'status-bar' };
+  }
+  return latest;
+}
+
 function detectStoryDayMarker(content = '') {
-  const head = stripReasoningBlocks(content)
+  const clockText = storyClockText(content);
+  const statusMarker = detectStatusDayMarker(clockText);
+  if (statusMarker) return statusMarker;
+  const head = clockText
     .replace(/<[^>]+>/g, ' ')
     .replace(/\r\n?/g, '\n')
     .replace(/^[\s\u3000*_#>`【\[（(—-]+/, '')
@@ -1904,10 +1941,7 @@ function detectStoryDayMarker(content = '') {
   const boundary = '(?:^|[\\n。！？!?；;]\\s*)';
 
   collect(new RegExp(`${boundary}(?:[【\\[(（]\\s*)?((?:19|20)\\d{2})[年\\/.\\-](\\d{1,2})[月\\/.\\-](\\d{1,2})日?`, 'gm'), match => {
-    const year = match[1];
-    const month = match[2].padStart(2, '0');
-    const day = match[3].padStart(2, '0');
-    return { type: 'absolute', key: `date:${year}-${month}-${day}`, label: `${year}年${Number(month)}月${Number(day)}日` };
+    return validatedStoryDate(match[1], match[2], match[3]);
   });
   collect(new RegExp(`${boundary}(?:[【\\[(（]\\s*)?(\\d{1,2})月(\\d{1,2})日`, 'gm'), match => {
     const month = match[1].padStart(2, '0');
@@ -1950,7 +1984,17 @@ function observeStoryDay(book, storyInfo) {
   if (!marker) return { shouldUpdate: false, reason: 'same-day', marker: null };
   if (marker.type === 'absolute') {
     if (timeline.currentDayKey === marker.key) return { shouldUpdate: false, reason: 'same-day', marker };
+    const previousDate = dateFromStoryKey(timeline.currentDayKey);
+    const nextDate = dateFromStoryKey(marker.key);
+    if (previousDate !== null && nextDate !== null && nextDate < previousDate) {
+      return { shouldUpdate: false, reason: 'backward-date', marker };
+    }
     if (timeline.currentDayKey === 'story-day:0') {
+      if (marker.source === 'status-bar') {
+        timeline.currentDayKey = marker.key;
+        timeline.currentDayLabel = marker.label;
+        return { shouldUpdate: false, reason: 'dated-baseline', marker };
+      }
       const completedDayLabel = timeline.currentDayLabel || '上一故事日';
       const period = storyPeriod(timeline.currentDayKey, completedDayLabel, marker);
       timeline.currentDayKey = marker.key;
@@ -1967,7 +2011,10 @@ function observeStoryDay(book, storyInfo) {
   const completedDayLabel = timeline.currentDayLabel || '上一故事日';
   const period = storyPeriod(timeline.currentDayKey, completedDayLabel, marker);
   timeline.daySequence = Number(timeline.daySequence || 0) + Math.max(1, Number(marker.spanDays) || 1);
-  timeline.currentDayKey = `story-day:${timeline.daySequence}`;
+  const anchoredDate = dateFromStoryKey(timeline.currentDayKey);
+  timeline.currentDayKey = anchoredDate === null ? `story-day:${timeline.daySequence}`
+    : `date:${new Date(anchoredDate + Math.max(1, Number(marker.spanDays) || 1) * 86400000).toISOString().slice(0, 10)}`;
+  period.toKey = timeline.currentDayKey;
   timeline.currentDayLabel = marker.label;
   return { shouldUpdate: true, reason: 'relative-boundary', marker, completedDayLabel, period };
 }
