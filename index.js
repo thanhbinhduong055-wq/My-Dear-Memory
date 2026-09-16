@@ -5,7 +5,7 @@ const MODULE_ID = 'st_private_journal';
 const CHAT_METADATA_KEY = MODULE_ID;
 const STORAGE_PREFIX = `${MODULE_ID}:book:`;
 const STORAGE_BACKUP_SUFFIX = ':backup';
-const PLUGIN_VERSION = '0.25.1';
+const PLUGIN_VERSION = '0.25.2';
 const RUNTIME_KEY = '__stPrivateJournalRuntime';
 const TRACE_KEY = '__stPrivateJournalTrace';
 const INSTANCE_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -120,6 +120,9 @@ let quoteSelectionHideTimer = null;
 let bookOpen = false;
 let mainGenerationActive = false;
 let journalGenerationActive = false;
+let autoCheckRunning = null;
+let autoRecheckRequested = false;
+let autoDayDiagnostics = { reason: 'idle' };
 const generationTasks = new Set();
 const bookSaveTails = new Map();
 let ownMainRequestActive = false;
@@ -2547,6 +2550,7 @@ async function checkRelationship() {
   } finally {
     relationshipCheckActive = false;
     render();
+    scheduleAutoGeneration();
   }
 }
 
@@ -2601,7 +2605,7 @@ function releaseMainGenerationLock(source = 'unknown', { schedule = true } = {})
   }
   const signature = latestAssistantSignature();
   const hasNewAssistantContent = Boolean(signature && signature !== mainGenerationStartSignature);
-  if (mainGenerationCycleSeen && (hasNewAssistantContent || queuedType)) {
+  if (getSettings().followMainGeneration || (mainGenerationCycleSeen && (hasNewAssistantContent || queuedType))) {
     scheduleAutoGeneration();
     return;
   }
@@ -2709,7 +2713,7 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
   const targetBook = currentBook;
   const targetStorageKey = storageKey();
   const signature = captureSignature || latestAssistantSignature();
-  if (signature && targetBook?.lastCapturedSignature === signature) return false;
+  if (signature && targetBook?.lastBatchCapturedSignature === signature) return true;
 
   const batchOptions = { period };
   const day = journalDayKey(targetBook, period);
@@ -2755,6 +2759,7 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
       storeJournalPage(targetBook, page, day);
     }
     if (targetBook.timeline?.currentDayKey) targetBook.timeline.lastUpdatedDayKey = targetBook.timeline.currentDayKey;
+    if (signature) targetBook.lastBatchCapturedSignature = signature;
     if (signature) targetBook.lastCapturedSignature = signature;
     await saveSpecificBook(targetBook, targetStorageKey);
     if (currentBook === targetBook) render();
@@ -2782,56 +2787,129 @@ async function generateBatch({ captureSignature = null, period = null } = {}) {
   }
 }
 
+function seedStoryTimeline(book, info) {
+  if (book.timeline?.currentDayKey) return;
+  const chat = ctx().chat || [];
+  // Replay prior visible exchanges locally, without generation. Dates may be
+  // present only every few replies, with relative day changes between them.
+  for (let i = 0; i < info.index; i++) {
+    const message = chat[i];
+    if (!message || message.is_user || message.is_system || message.extra?.privateJournalMailId) continue;
+    let content = visibleMessageContent(message);
+    for (let u = i - 1; u >= 0 && chat[u]?.is_user; u--) {
+      if (!chat[u].is_system && !chat[u].extra?.privateJournalMailId) content = visibleMessageContent(chat[u]) + '\n' + content;
+    }
+    observeStoryDay(book, { signature: `baseline:${i}`, content });
+  }
+}
+
+function recordAutoDay(reason, extra = {}) {
+  autoDayDiagnostics = { reason, checkedAt: new Date().toISOString(), ...extra };
+  trace('auto-day:check', autoDayDiagnostics);
+}
+
 function scheduleAutoGeneration() {
-  if ((!getSettings().followMainGeneration && !queuedType) || journalGenerationActive || !mainGenerationCycleSeen) return;
+  if (!getSettings().followMainGeneration) return;
+  if (autoCheckRunning) { autoRecheckRequested = true; return; }
   clearTimeout(autoGenerationTimer);
-  autoGenerationTimer = setTimeout(async () => {
-    const storyInfo = latestStoryExchangeInfo();
-    const signature = storyInfo?.signature || null;
-    const hasNewAssistantContent = signature && signature !== mainGenerationStartSignature;
-    if (!hasNewAssistantContent) {
-      if (autoGenerationRetries < 10) {
-        autoGenerationRetries += 1;
-        setStatus('正文已完成，正在等待消息写入…');
-        scheduleAutoGeneration();
-        return;
-      }
-      const requestedType = queuedType;
-      queuedType = null;
-      mainGenerationCycleSeen = false;
-      autoGenerationRetries = 0;
-      if (requestedType && signature) {
-        setStatus('未等到新的正文签名，按当前对话生成排队页…');
-        await generatePage({ type: requestedType, source: 'manual', captureSignature: signature });
-      }
-      return;
-    }
-    if (!signature || currentBook?.lastCapturedSignature === signature) {
-      mainGenerationCycleSeen = false;
-      autoGenerationRetries = 0;
-      return;
-    }
-    const requestedType = queuedType;
-    queuedType = null;
+  const key = storageKey(), revision = initializationRevision;
+  autoGenerationTimer = setTimeout(() => {
+    void checkAutoStoryDay(key, revision).catch(error => {
+      if (key !== storageKey() || revision !== initializationRevision) return;
+      recordAutoDay('error', { error: String(error?.message || error) });
+      setStatus('自动整理检查失败，待办已保留；下一轮回复后重试');
+      safeToastr('warning', `自动整理检查失败：${error?.message || error}`);
+    });
+  }, 500);
+}
+
+async function checkAutoStoryDay(key, revision) {
+  const valid = () => revision === initializationRevision && key === storageKey() && getSettings().followMainGeneration;
+  if (!valid() || autoCheckRunning) return;
+  if (ownMainRequestActive || journalGenerationActive || relationshipCheckActive) {
+    recordAutoDay('waiting-for-journal');
+    return; // Task completion calls scheduleAutoGeneration again.
+  }
+  if (mainGenerationActive) reconcileMainGenerationLock('auto-day');
+  if (mainGenerationActive || hostReportsMainGenerationActive()) {
+    recordAutoDay('waiting-for-main');
+    scheduleAutoGeneration();
+    return;
+  }
+  if (pendingBookLoad) await pendingBookLoad;
+  if (!valid() || autoCheckRunning) return;
+  const info = latestStoryExchangeInfo();
+  if (!info?.signature) return;
+  if (mainGenerationCycleSeen && info.signature === mainGenerationStartSignature && autoGenerationRetries < 20) {
+    autoGenerationRetries++;
+    recordAutoDay('waiting-for-message');
+    scheduleAutoGeneration();
+    return;
+  }
+  const token = {};
+  autoCheckRunning = token;
+  autoRecheckRequested = false;
+  const book = currentBook;
+  try {
     mainGenerationCycleSeen = false;
     autoGenerationRetries = 0;
-    if (requestedType) {
-      await generatePage({ type: requestedType, source: 'manual', captureSignature: signature });
+    seedStoryTimeline(book, info);
+    const decision = observeStoryDay(book, info);
+    if (decision.shouldUpdate) {
+      const previous = book.timeline.pendingAutoUpdate;
+      const period = previous ? storyPeriod(previous.period.fromKey, previous.period.fromLabel, decision.marker) : decision.period;
+      book.timeline.pendingAutoUpdate = { signature: info.signature, period, attemptedSignature: null };
+    }
+    const pending = book.timeline.pendingAutoUpdate;
+    recordAutoDay(decision.reason, { day: book.timeline.currentDayKey, source: decision.marker?.source || decision.marker?.type || null, pending: Boolean(pending) });
+    if (!pending) {
+      if (decision.reason !== 'duplicate') await saveSpecificBook(book, key);
+      if (valid() && book === currentBook && decision.reason !== 'duplicate') setStatus(!decision.marker
+        ? '本轮未识别到新的故事日期；保留原故事日'
+        : `已识别 ${book.timeline.currentDayLabel}；${decision.shouldUpdate ? '等待整理' : '等待跨日'}`);
       return;
     }
-    if (getSettings().followMainGeneration) {
-      const decision = observeStoryDay(currentBook, storyInfo);
-      await saveBook();
-      if (decision.shouldUpdate) {
-        setStatus(`已跨日，正在整理${decision.completedDayLabel || '上一故事日'}…`);
-        await generateBatch({ captureSignature: signature, period: decision.period });
-      } else if (decision.reason === 'baseline' || decision.reason === 'dated-baseline') {
-        setStatus('已建立故事日基线；跨日后自动整理');
-      } else {
-        setStatus('正在收集当天故事；跨日后再更新');
-      }
+    if (book.lastBatchCapturedSignature === pending.signature) {
+      delete book.timeline.pendingAutoUpdate;
+      await saveSpecificBook(book, key);
+      return;
     }
-  }, 500);
+    if (pending.attemptedSignature === info.signature) return;
+    // Persist the boundary before sending. Failure leaves it pending; duplicate
+    // events never trigger automatic paid retries. A new reply may retry once.
+    await saveSpecificBook(book, key);
+    if (!valid() || book !== currentBook) return;
+    if (mainGenerationActive || journalGenerationActive || relationshipCheckActive || hostReportsMainGenerationActive()) {
+      autoRecheckRequested = true;
+      return;
+    }
+    pending.attemptedSignature = info.signature;
+    pending.signature = info.signature;
+    await saveSpecificBook(book, key);
+    if (!valid() || book !== currentBook) return;
+    setStatus(`已跨日，正在整理 ${pending.period.label}…`);
+    const completed = await generateBatch({ captureSignature: info.signature, period: pending.period });
+    if (revision !== initializationRevision) return;
+    if (completed) {
+      book.lastBatchCapturedSignature = info.signature;
+      if (book.timeline.pendingAutoUpdate === pending) delete book.timeline.pendingAutoUpdate;
+    }
+    await saveSpecificBook(book, key);
+    if (valid() && book === currentBook) {
+      recordAutoDay(completed ? 'completed' : 'pending-retry', { day: book.timeline.currentDayKey });
+      if (!completed) setStatus('跨日待办已保留；下一轮正文回复后重试');
+    }
+  } finally {
+    if (autoCheckRunning === token) {
+      autoCheckRunning = null;
+      if (autoRecheckRequested && revision === initializationRevision) scheduleAutoGeneration();
+    }
+  }
+}
+
+function onStoryMessageSettled() {
+  scheduleMailCheck();
+  if (!ownMainRequestActive) scheduleAutoGeneration();
 }
 
 function pageById(id) {
@@ -4358,6 +4436,9 @@ function cleanupPluginInstance(reason = 'unspecified') {
   mainGenerationActive = false;
   journalGenerationActive = false;
   generationTasks.clear();
+  autoCheckRunning = null;
+  autoRecheckRequested = false;
+  autoDayDiagnostics = { reason: 'idle' };
   relationshipCheckActive = false;
   mainGenerationCycleSeen = false;
   mainGenerationStartSignature = null;
@@ -4435,6 +4516,12 @@ async function initialize({ reason = 'bootstrap' } = {}) {
     const context = ctx();
     const eventSource = context.eventSource;
     bindContextEvent(eventSource, context.eventTypes?.CHAT_CHANGED, () => {
+      clearTimeout(autoGenerationTimer);
+      clearMainGenerationWatchdog();
+      mainGenerationActive = false;
+      mainGenerationCycleSeen = false;
+      mainGenerationStartSignature = null;
+      autoGenerationRetries = 0;
       closeMailAnimation({ restoreFocus: false });
       clearTimeout(mailCheckTimer);
       mailDraft = { kind: 'card', body: '' };
@@ -4464,11 +4551,8 @@ async function initialize({ reason = 'bootstrap' } = {}) {
         releaseMainGenerationLock('generation-stopped');
       }
     });
-    bindContextEvent(eventSource, context.eventTypes?.CHARACTER_MESSAGE_RENDERED, () => {
-      if (mainGenerationCycleSeen) releaseMainGenerationLock('character-message-rendered');
-      else scheduleMailCheck();
-    });
-    bindContextEvent(eventSource, context.eventTypes?.MESSAGE_RECEIVED, scheduleMailCheck);
+    bindContextEvent(eventSource, context.eventTypes?.CHARACTER_MESSAGE_RENDERED, onStoryMessageSettled);
+    bindContextEvent(eventSource, context.eventTypes?.MESSAGE_RECEIVED, onStoryMessageSettled);
     if (thisInitialization !== initializationRevision) return false;
     void startBookLoad('initialize').catch(error => {
       logLifecycle('initialize:background-load', error);
@@ -4497,6 +4581,7 @@ window[RUNTIME_KEY] = {
   initialize: () => initialize({ reason: 'runtime-api' }),
   dispose: reason => cleanupPluginInstance(reason || 'runtime-api'),
   diagnostics: () => diagnosticSnapshot(),
+  autoDay: () => ({ ...autoDayDiagnostics }),
   probeOverlay: () => probeOverlay('manual'),
   stylesheet: () => inspectStylesheet(),
   assets: () => ({ ...extensionAssetBaseInfo, attempts: extensionScriptInfo.attempts }),

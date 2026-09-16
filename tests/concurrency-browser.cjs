@@ -9,6 +9,7 @@ const fixture = path.join(__dirname, 'fixtures');
 const version = JSON.parse(fs.readFileSync(path.join(candidate, 'manifest.json'))).version;
 const inject = `
 const c = SillyTavern.getContext();
+c.eventTypes.MESSAGE_RECEIVED='message_received';
 c.chat = [{is_user:true,mes:'2025年9月24日，我们初次相遇。'},{is_user:false,mes:'2025年9月24日，他陪你走回家。'}];
 c.extensionSettings.st_private_journal = {followMainGeneration:false,generationApiMode:'secondary',secondaryProfileId:'test',secondaryModelId:'model-A'};
 window.taskTest={c,calls:[],saved:[],writes:0,maxWrites:0};
@@ -125,9 +126,43 @@ const server = http.createServer((req,res)=>{
       await page.waitForTimeout(150);
       assert.equal(await page.evaluate(()=>taskTest.saved.some(item=>JSON.stringify(item.v).includes('旧实例不应保存'))),false);
       assert.equal(await page.locator('#private-journal').count(),1);
+      // Exercise installed host-event handlers and real batch parser/save path.
+      await page.evaluate(()=>{
+        taskTest.c.extensionSettings.st_private_journal.followMainGeneration=true;
+        taskTest.c.eventSource.emit('generation_started');
+        taskTest.c.eventSource.emit('generation_ended');
+        taskTest.c.chat.push({is_user:true,mes:'继续。'},{is_user:false,mes:'日期：2025-09-25\n他走到窗前。'});
+        taskTest.c.eventSource.emit('message_received');
+        taskTest.c.eventSource.emit('character_message_rendered');
+      });
+      await page.waitForFunction(()=>taskTest.calls.length===8);
+      await page.evaluate(()=>{
+        taskTest.batch=i=>taskTest.calls[i].resolve(JSON.stringify({updates:['impression','daily_note','love_letter'].map(type=>({type,page:{title:'跨日整理',body:'自动整理已完成。',dateLabel:'2025-09-24'}}))}));
+        taskTest.batch(7);
+      });
+      await page.waitForFunction(()=>window.__stPrivateJournalRuntime.autoDay().reason==='completed');
+      assert.equal(await page.evaluate(()=>!!taskTest.c.chatMetadata.st_private_journal.timeline.pendingAutoUpdate),false);
+      await page.evaluate(()=>{taskTest.c.eventSource.emit('message_received');taskTest.c.eventSource.emit('character_message_rendered');});
+      await page.waitForTimeout(700);
+      assert.equal(await page.evaluate(()=>taskTest.calls.length),8,'duplicate real events do not generate twice');
+      await page.evaluate(()=>{
+        taskTest.c.chat.push({is_user:false,mes:'日期：2025-09-26\n他回到家中。'});
+        taskTest.c.eventSource.emit('message_received');
+      });
+      await page.waitForFunction(()=>taskTest.calls.length===9);
+      await page.evaluate(()=>taskTest.calls[8].reject(new Error('temporary failure')));
+      await page.waitForFunction(()=>window.__stPrivateJournalRuntime.autoDay().reason==='pending-retry');
+      assert.equal(await page.evaluate(()=>!!taskTest.c.chatMetadata.st_private_journal.timeline.pendingAutoUpdate),true);
+      await page.evaluate(()=>{
+        taskTest.c.chat.push({is_user:false,mes:'他笑着应了一声。'});
+        taskTest.c.eventSource.emit('character_message_rendered');
+      });
+      await page.waitForFunction(()=>taskTest.calls.length===10);
+      await page.evaluate(()=>taskTest.batch(9));
+      await page.waitForFunction(()=>window.__stPrivateJournalRuntime.autoDay().reason==='completed');
       assert.equal(await page.evaluate(()=>window.__stPrivateJournalRuntime.stylesheet().status),'ok');
       assert.deepEqual(errors,[]);
-      console.log('PASS '+width+'px: concurrent sections, duplicate guard, reverse completion, ordered saving, failure recovery, main queue, chat isolation, stale instance, 5 lazy fonts/offline fallback');
+      console.log('PASS '+width+'px: concurrency/font regression + actual end-before-message handlers, batch save, duplicate events, persisted failure and next-reply recovery');
       await context.close();
     }
   } finally {await browser.close();server.close();}

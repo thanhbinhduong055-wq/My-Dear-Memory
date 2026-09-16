@@ -52,7 +52,7 @@ console.log('PASS status labels / HTML / Markdown / YAML / status wrapper / emoj
 (async()=>{
   context.extensionSettings.st_private_journal={followMainGeneration:true};
   context.chat=[{is_user:true,mes:'一起回家吧。'},{is_user:false,mes:'日期：2025-10-26\n他送你回家。'}];
-  run('currentBook=blankBook(); observeStoryDay(currentBook,latestStoryExchangeInfo()); saveBook=async()=>{}; globalThis.batchCalls=[]; generateBatch=async options=>{batchCalls.push(options);return true;};');
+  run('currentBook=blankBook(); observeStoryDay(currentBook,latestStoryExchangeInfo()); saveBook=async()=>{}; saveSpecificBook=async()=>true; globalThis.batchCalls=[]; generateBatch=async options=>{batchCalls.push(options);return true;};');
   const trigger=async text=>{
     context.chat.push({is_user:true,mes:'继续。'},{is_user:false,mes:text});
     run('mainGenerationCycleSeen=true; mainGenerationStartSignature="previous"; scheduleAutoGeneration();');
