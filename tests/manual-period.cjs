@@ -1,0 +1,17 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const base=path.resolve(process.argv[2]||path.join(__dirname,'..'));
+const source=fs.readFileSync(path.join(base,'index.js'),'utf8').replace(/^\(\(\) => \{\r?\n'use strict';\r?\n/,'').replace(/\r?\n\}\)\(\);\s*$/,'');
+const c={chatId:'test',chat:[],extensionSettings:{},chatMetadata:{}};
+const box={console,setTimeout,clearTimeout,URL,TextEncoder,Uint8Array,DataView,Blob,AbortController,window:{crypto:{}},document:{readyState:'loading',addEventListener(){},querySelector(){return null;}},SillyTavern:{getContext:()=>c,libs:{}}};
+vm.createContext(box);const run=s=>vm.runInContext(s,box);run(source);
+assert.throws(()=>run("manualStoryPeriod('2025-11-07','2025-11-06')"),/结束日期/);
+assert.throws(()=>run("manualStoryPeriod('2025-02-30','2025-03-01')"),/有效/);
+assert.equal(run("manualStoryPeriod('2025-11-06','2025-11-06').spanDays"),1);
+c.chat=[{is_user:false,mes:'【2025年11月6日 21:45 星期四|家中】\n旧日散步。\n<think>日期：2030-01-01\n秘密推理</think>\n【2025年11月7日 09:30 星期五|办公室】\n新日工作。'},{is_user:true,mes:'一起吃饭。'},{is_user:false,mes:'第二天，出发旅行。'},{is_system:true,mes:'2025年11月6日 系统秘密'},{is_user:true,mes:'2025年11月6日 隐藏信件',extra:{privateJournalMailId:'mail'}}];
+const single=run("collectStoryPeriodText(manualStoryPeriod('2025-11-06','2025-11-06'))");
+assert.match(single,/旧日散步/);assert.doesNotMatch(single,/新日工作|秘密|信件/);
+const range=run("collectStoryPeriodText(manualStoryPeriod('2025-11-06','2025-11-07'))");
+assert.match(range,/旧日散步/);assert.match(range,/新日工作/);assert.match(range,/一起吃饭/);assert.doesNotMatch(range,/出发旅行/);
+assert.match(run("collectStoryPeriodText(manualStoryPeriod('2025-11-08','2025-11-08'))"),/出发旅行/);
+assert.throws(()=>run("collectStoryPeriodText(manualStoryPeriod('2025-10-01','2025-10-02'))"),/没有找到/);
+console.log('PASS manual range: valid dates, inclusive boundaries, same-reply split, relative dates, reasoning/mail/system exclusions, empty range rejection');

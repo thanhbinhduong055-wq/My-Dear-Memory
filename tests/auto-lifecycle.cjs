@@ -15,6 +15,20 @@ const wait=()=>new Promise(r=>setTimeout(r,1100));
 let failed=0;
 async function test(name,fn){const f=fixture();try{await fn(f);console.log('PASS '+name);}catch(e){failed++;console.error('FAIL '+name+': '+e.message);}finally{f.close();}}
 (async()=>{
+ await test('screenshot-style bracket timestamps cross day',async f=>{
+  f.c.chat=[{is_user:false,mes:'【2025年11月6日 21:45 星期四|北京市|初冬寒夜|静谧】\n他回家。'}];
+  f.run('currentBook=blankBook();observeStoryDay(currentBook,latestStoryExchangeInfo());');
+  f.next('看着那些金鱼争抢食物。\n明天烤鸭。\n【2025年11月7日 09:30 星期五|北京市|晴朗|忙碌】\n他走进办公室。');
+  f.run('scheduleAutoGeneration()');await wait();assert.equal(f.run('calls.length'),1);
+ });
+ await test('new bracket status overrides old labeled user status',async f=>{
+  f.c.chat.push({is_user:true,mes:'日期：2025-09-24\n继续。'},{is_user:false,mes:'【2025年9月25日 09:30 星期四|办公室|晴】\n他到了。'});
+  f.run('scheduleAutoGeneration()');await wait();assert.equal(f.run('calls.length'),1);
+ });
+ await test('first observed reply contains two story days',async f=>{
+  f.c.chat=[{is_user:false,mes:'【2025年11月6日 21:45 星期四|家中】\n他回家。\n【2025年11月7日 09:30 星期五|办公室】\n他工作。'}];
+  f.run('currentBook=blankBook();scheduleAutoGeneration()');await wait();assert.equal(f.run('calls.length'),1);
+ });
  await test('end event before message is stored',async f=>{
   f.run('mainGenerationCycleSeen=true;mainGenerationStartSignature=latestAssistantSignature();releaseMainGenerationLock("generation-ended");');
   f.next();await wait();assert.equal(f.run('calls.length'),1);
